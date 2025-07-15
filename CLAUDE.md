@@ -12,21 +12,26 @@ This is `sqlite-delta`, a collection of Change Data Capture (CDC) patterns for S
 
 ```bash
 # Install dependencies
-uv sync --dev
+uv sync
 
-# Lint SQL files (must pass for PRs)
+# Lint python files
 uv run poe lint
 
-# Format SQL files
+# Format python files
 uv run poe fmt
 
-# Test all patterns (must pass for PRs)
+# Test all patterns
 uv run poe test
+
+# Run a specific python file
+uv run path/to/python/file.py
 ```
+
+Run lint, fmt, and test before finishing any task to verify correctness.
 
 ### Dependencies
 
-- **uv** - Python package manager (required)
+- **uv** - Python package manager and task runner (required)
 - **sqlite3** - SQLite command line tool (required)
 
 ## Repository layout
@@ -39,20 +44,5 @@ uv run poe test
 ### Pattern file structure
 
 - `pattern.sql` - Complete SQL implementation (legacy)
-- `pattern.py` - Python implementation with templated SQL and comprehensive tests
+- `pattern.py` - Python implementation of pattern along with comprehensive tests
 - `README.md` - Additional pattern documentation and usage examples
-
-## Development Guidelines
-
-### Code Quality
-
-- All SQL must pass `uv run poe lint` (SQLFluff with SQLite dialect)
-- All patterns must pass `uv run poe test` (runs pattern.py files)
-- PRs require passing linting, formatting, and testing checks
-
-### SQL Patterns
-
-- Patterns use pure SQL with no runtime dependencies
-- Designed for SQLite 3.x compatibility
-- Extensively documented with inline comments
-- Include complete examples and usage patterns

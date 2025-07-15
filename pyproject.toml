@@ -10,6 +10,6 @@ dependencies = ["jinja2>=3.0.0"]
 dev = ["poethepoet>=0.36.0", "sqlfluff>=3.4.2"]
 
 [tool.poe.tasks]
-lint = "uv run sqlfluff lint --dialect sqlite ."
-fmt = "uv run sqlfluff format --dialect sqlite ."
+lint = "uv run ruff check"
+fmt = "uv run ruff format"
 test = "./test.sh"

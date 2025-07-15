@@ -5,29 +5,8 @@ This module provides a Change Data Capture (CDC) implementation using SQLite tri
 The pattern tracks changes to application tables using a central changes table and
 provides functionality to generate changesets for replication or synchronization.
 
-Key Features:
-- Automatic change tracking via triggers
-- Global Sequence Number (GSN) for ordering changes
-- Changeset generation with automatic cleanup
-- Support for tables with explicit rowid columns
-- Context manager for atomic changeset operations
-
-Usage:
-    # Set up the pattern (autocommit enabled)
-    conn = sqlite3.connect(":memory:", autocommit=True)
-
-    setup_changes_table(conn)
-    setup_triggers(conn, "users", table_id=1)
-
-    # Generate changeset with automatic cleanup
-    with changeset(conn, {"users": 1}) as changeset_data:
-        # Process changeset
-        for table_name, operations in changeset_data.items():
-            for op in operations:
-                if isinstance(op, UpsertOp):
-                    print(f"Upsert: {op.rowid} -> {op.data}")
-                elif isinstance(op, DeleteOp):
-                    print(f"Delete: {op.rowid}")
+This code is not intended for production use, but serves as a demonstration of
+the pattern and tests its correctness.
 """
 
 import contextlib
@@ -147,7 +126,9 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
 
 
 @contextmanager
-def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterator[Changeset]:
+def changeset(
+    conn: sqlite3.Connection, table_mapping: Dict[str, int]
+) -> Iterator[Changeset]:
     """
     Context manager for atomic changeset generation and cleanup.
 
@@ -186,7 +167,9 @@ def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterat
         snapshot_gsn = cursor.fetchone()[0]
 
         for table_name, table_id in table_mapping.items():
-            sql = changeset_template.render(table_name=table_name, table_id=table_id).strip()
+            sql = changeset_template.render(
+                table_name=table_name, table_id=table_id
+            ).strip()
 
             cursor = conn.execute(sql)
             columns = [description[0] for description in cursor.description]
@@ -268,7 +251,9 @@ def run_example() -> None:
         # Set up triggers for both tables
         setup_triggers(conn, "AppTable", table_id=table_mapping["AppTable"])
         setup_triggers(
-            conn, "AppTableExplicitRowid", table_id=table_mapping["AppTableExplicitRowid"]
+            conn,
+            "AppTableExplicitRowid",
+            table_id=table_mapping["AppTableExplicitRowid"],
         )
 
         # Insert some initial data
@@ -298,7 +283,9 @@ def run_example() -> None:
 
         # Make some updates
         conn.execute("UPDATE AppTable SET t = 'data 1; revision 2' WHERE id = 1")
-        conn.execute("UPDATE AppTableExplicitRowid SET t = 'data 1; revision 2' WHERE id = 'id1'")
+        conn.execute(
+            "UPDATE AppTableExplicitRowid SET t = 'data 1; revision 2' WHERE id = 'id1'"
+        )
 
         # Delete a row
         conn.execute("DELETE FROM AppTable WHERE id = 5")
@@ -336,7 +323,9 @@ def test_pattern():
             setup_changes_table(conn)
 
             # Create test table and define table mapping
-            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
+            conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
+            )
             table_mapping = {"users": 1}
             setup_triggers(conn, "users", table_id=table_mapping["users"])
 
@@ -344,7 +333,9 @@ def test_pattern():
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')"
             )
-            conn.execute("INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')")
+            conn.execute(
+                "INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')"
+            )
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (3, 'Charlie', 'charlie@example.com')"
             )
@@ -353,7 +344,9 @@ def test_pattern():
             conn.execute("DELETE FROM changes")
 
             # Make changes
-            conn.execute("UPDATE users SET email = 'alice.updated@example.com' WHERE id = 1")
+            conn.execute(
+                "UPDATE users SET email = 'alice.updated@example.com' WHERE id = 1"
+            )
             conn.execute("DELETE FROM users WHERE id = 3")
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (4, 'David', 'david@example.com')"
@@ -364,7 +357,9 @@ def test_pattern():
                 operations = changeset_data["users"]
 
                 # Should have operations for all modified rows
-                assert len(operations) == 3, f"Expected 3 operations, got {len(operations)}"
+                assert len(operations) == 3, (
+                    f"Expected 3 operations, got {len(operations)}"
+                )
 
                 # Check operation types
                 upserts = [op for op in operations if isinstance(op, UpsertOp)]
@@ -375,7 +370,9 @@ def test_pattern():
 
                 # Verify delete operation
                 delete_op = deletes[0]
-                assert delete_op.rowid == 3, f"Expected delete rowid=3, got {delete_op.rowid}"
+                assert delete_op.rowid == 3, (
+                    f"Expected delete rowid=3, got {delete_op.rowid}"
+                )
 
                 # Verify upsert data includes all columns
                 alice_op = next(op for op in upserts if op.data.get("id") == 1)
@@ -390,7 +387,9 @@ def test_pattern():
 
             # Create multiple tables and define table mapping
             conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-            conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, user_id INTEGER)")
+            conn.execute(
+                "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, user_id INTEGER)"
+            )
             table_mapping = {"users": 1, "posts": 2}
 
             setup_triggers(conn, "users", table_id=table_mapping["users"])
@@ -416,11 +415,15 @@ def test_pattern():
 
                 # Check users changes
                 users_ops = changeset_data["users"]
-                assert len(users_ops) == 1, f"Expected 1 user operation, got {len(users_ops)}"
+                assert len(users_ops) == 1, (
+                    f"Expected 1 user operation, got {len(users_ops)}"
+                )
 
                 # Check posts changes
                 posts_ops = changeset_data["posts"]
-                assert len(posts_ops) == 1, f"Expected 1 post operation, got {len(posts_ops)}"
+                assert len(posts_ops) == 1, (
+                    f"Expected 1 post operation, got {len(posts_ops)}"
+                )
 
                 # Verify we have a delete operation for posts
                 post_deletes = [op for op in posts_ops if isinstance(op, DeleteOp)]
@@ -445,16 +448,22 @@ def test_pattern():
             # Verify changes exist
             cursor = conn.execute("SELECT COUNT(*) FROM changes")
             initial_count = cursor.fetchone()[0]
-            assert initial_count == 2, f"Expected 2 initial changes, got {initial_count}"
+            assert initial_count == 2, (
+                f"Expected 2 initial changes, got {initial_count}"
+            )
 
             # Generate changeset (should clean up)
             with changeset(conn, table_mapping) as changeset_data:
-                assert len(changeset_data["test_table"]) == 2, "Expected 2 operations in changeset"
+                assert len(changeset_data["test_table"]) == 2, (
+                    "Expected 2 operations in changeset"
+                )
 
             # Verify changes were cleaned up
             cursor = conn.execute("SELECT COUNT(*) FROM changes")
             remaining_count = cursor.fetchone()[0]
-            assert remaining_count == 0, f"Expected 0 remaining changes, got {remaining_count}"
+            assert remaining_count == 0, (
+                f"Expected 0 remaining changes, got {remaining_count}"
+            )
 
             # Add new changes after cleanup
             conn.execute("INSERT INTO test_table (id, data) VALUES (3, 'data3')")
@@ -482,25 +491,36 @@ def test_pattern():
             """)
             table_mapping = {"explicit_table": 1}
 
-            setup_triggers(conn, "explicit_table", table_id=table_mapping["explicit_table"])
+            setup_triggers(
+                conn, "explicit_table", table_id=table_mapping["explicit_table"]
+            )
 
             # Insert data
-            conn.execute("INSERT INTO explicit_table (id, data) VALUES (?, ?)", (b"key1", "value1"))
-            conn.execute("INSERT INTO explicit_table (id, data) VALUES (?, ?)", (b"key2", "value2"))
+            conn.execute(
+                "INSERT INTO explicit_table (id, data) VALUES (?, ?)",
+                (b"key1", "value1"),
+            )
+            conn.execute(
+                "INSERT INTO explicit_table (id, data) VALUES (?, ?)",
+                (b"key2", "value2"),
+            )
 
             # clear changes to ensure that only the following changes are tracked
             conn.execute("DELETE FROM changes")
 
             # Update and delete
             conn.execute(
-                "UPDATE explicit_table SET data = 'updated_value1' WHERE id = ?", (b"key1",)
+                "UPDATE explicit_table SET data = 'updated_value1' WHERE id = ?",
+                (b"key1",),
             )
             conn.execute("DELETE FROM explicit_table WHERE id = ?", (b"key2",))
 
             # Generate changeset
             with changeset(conn, table_mapping) as changeset_data:
                 operations = changeset_data["explicit_table"]
-                assert len(operations) == 2, f"Expected 2 operations, got {len(operations)}"
+                assert len(operations) == 2, (
+                    f"Expected 2 operations, got {len(operations)}"
+                )
 
                 # Check for upsert and delete
                 upserts = [op for op in operations if isinstance(op, UpsertOp)]
