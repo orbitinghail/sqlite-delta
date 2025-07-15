@@ -28,6 +28,7 @@ Our automated PR checks verify that:
 
 - The code has been formatted correctly, according to `uv run poe fmt`.
 - There are no linting errors, according to `uv run poe lint`.
+- All pattern tests pass, according to `uv run poe test`.
 
 ## Licensing
 

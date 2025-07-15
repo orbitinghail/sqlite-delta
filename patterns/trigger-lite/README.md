@@ -1,18 +1,66 @@
-# Trigger-lite CDC pattern
+# Trigger-lite CDC Pattern
 
-## SQLite configuration
+The trigger-lite pattern provides automatic Change Data Capture (CDC) for SQLite databases using triggers and a central changes table. It's designed for general-purpose replication and change tracking scenarios.
 
-This pattern depends on holding a read transaction open on the database while building the changeset. Thus, WAL mode is recommended when using this pattern.
+## How it works
 
+The pattern consists of three main components:
+
+### 1. Changes Table
+
+A central table that tracks all modifications across your application tables:
+
+```sql
+CREATE TABLE changes (
+    tid INTEGER NOT NULL,  -- table identifier
+    rid INTEGER NOT NULL,  -- row identifier (SQLite rowid)
+    gsn INTEGER NOT NULL,  -- Global Sequence Number for ordering
+    PRIMARY KEY (tid, rid)
+) WITHOUT ROWID;
 ```
-pragma journal_mode=wal;
-```
+
+See [`setup_changes_table()`](pattern.py) for the implementation.
+
+### 2. Database Triggers
+
+Automatic triggers on each tracked table that record changes to the changes table:
+
+- **INSERT trigger**: Records new rows
+- **UPDATE trigger**: Records modified rows
+- **DELETE trigger**: Records deleted rows
+
+Each trigger assigns a unique **Global Sequence Number (GSN)** to maintain change ordering across all tables.
+
+See [`setup_triggers()`](pattern.py) for the implementation.
+
+### 3. Changeset Generation
+
+A context manager that atomically:
+
+1. Captures the current GSN
+2. Generates changesets by joining application tables with the changes table
+3. Returns typed operations (`UpsertOp` for inserts/updates, `DeleteOp` for deletes)
+4. Automatically cleans up processed changes
+
+See [`changeset()`](pattern.py) for the implementation.
+
+## Requirements
+
+- **Explicit rowid**: Tables must use either `INTEGER PRIMARY KEY` or an explicit rowid column
+- **WAL mode**: Recommended for concurrent access during changeset generation
+- **Table IDs**: Use integer identifiers for tables (more efficient than strings)
 
 ## Best suited for
 
-- general purpose replication or change tracking.
-- when you are ok with storing the entire row in the changeset whenever the row changes.
+- General purpose replication or change tracking
+- Scenarios where storing entire row data in changesets is acceptable
+
+## Implementation Details
+
+See [`run_example()`](pattern.py) for a complete working example and the test functions for comprehensive usage patterns.
 
 ## Tweaks
 
-- Instead of using the SQLite rowid, use the row's primary key to track changes. This may require extending SQLite with a function which can encode multi-column PKs into a single canonical value.
+- **Primary key tracking**: Instead of SQLite rowid, use table primary keys(requires extending SQLite with a custom function to encode multi-column PKs)
+- **String table names**: Use table names instead of IDs in the changes table (less efficient but more readable; if you do this consider removing `WITHOUT ROWID`)
+- **Custom cleanup**: Implement custom changeset retention policies instead of immediate cleanup (will require keeping around the GSN to start the next changeset from)

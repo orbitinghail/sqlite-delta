@@ -3,8 +3,8 @@ name = "sqlite-delta"
 version = "0.1.0"
 description = "Collection of CDC patterns for SQLite."
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.13"
+dependencies = ["jinja2>=3.0.0"]
 
 [dependency-groups]
 dev = ["poethepoet>=0.36.0", "sqlfluff>=3.4.2"]
@@ -12,3 +12,4 @@ dev = ["poethepoet>=0.36.0", "sqlfluff>=3.4.2"]
 [tool.poe.tasks]
 lint = "uv run sqlfluff lint --dialect sqlite ."
 fmt = "uv run sqlfluff format --dialect sqlite ."
+test = "./test.sh"

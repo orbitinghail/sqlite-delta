@@ -19,6 +19,9 @@ uv run poe lint
 
 # Format SQL files
 uv run poe fmt
+
+# Test all patterns (must pass for PRs)
+uv run poe test
 ```
 
 ### Dependencies
@@ -35,7 +38,8 @@ uv run poe fmt
 
 ### Pattern file structure
 
-- `pattern.sql` - Complete SQL implementation
+- `pattern.sql` - Complete SQL implementation (legacy)
+- `pattern.py` - Python implementation with templated SQL and comprehensive tests
 - `README.md` - Additional pattern documentation and usage examples
 
 ## Development Guidelines
@@ -43,7 +47,8 @@ uv run poe fmt
 ### Code Quality
 
 - All SQL must pass `uv run poe lint` (SQLFluff with SQLite dialect)
-- PRs require passing linting and formatting checks
+- All patterns must pass `uv run poe test` (runs pattern.py files)
+- PRs require passing linting, formatting, and testing checks
 
 ### SQL Patterns
 
