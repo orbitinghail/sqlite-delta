@@ -15,6 +15,7 @@
 ## Glossary
 
 - **Changeset**: A Changeset is a set of operations which encode the difference between two versions of a SQLite database or table.
+- **Checkpoint**: A canonical full dump of a SQLite database or table.
 
 ## Dependencies
 

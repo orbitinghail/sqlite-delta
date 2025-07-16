@@ -44,6 +44,12 @@ A context manager that atomically:
 
 See [`changeset()`](pattern.py) for the implementation.
 
+### 4. Checkpoint Generation
+
+Periodically a Checkpoint should be created to allow the history of changesets to restart. This ensures that the history doesn't get too long, as well as serving as a backup should something go wrong.
+
+Before Checkpointing the database, you must truncate the `changes` table. This effectively resets the change history allowing it to start from scratch.
+
 ## Requirements
 
 - **Explicit rowid**: Tables must use either `INTEGER PRIMARY KEY` or an explicit rowid column

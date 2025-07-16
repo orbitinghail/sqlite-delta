@@ -15,8 +15,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Union
 
-from jinja2 import Template
-
 
 @contextmanager
 def sqlite3_test_db() -> Iterator[sqlite3.Connection]:
@@ -89,40 +87,40 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
     defined Table IDs rather than strings.
     """
     # Create INSERT trigger
-    insert_trigger = Template("""
-        CREATE TRIGGER IF NOT EXISTS trg_{{ table_name }}_insert
-        AFTER INSERT ON {{ table_name }}
+    insert_trigger_sql = f"""
+        CREATE TRIGGER IF NOT EXISTS trg_{table_name}_insert
+        AFTER INSERT ON {table_name}
         BEGIN
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({{ table_id }}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
-    """)
-    conn.execute(insert_trigger.render(table_name=table_name, table_id=table_id))
+    """
+    conn.execute(insert_trigger_sql)
 
     # Create UPDATE trigger
-    update_trigger = Template("""
-        CREATE TRIGGER IF NOT EXISTS trg_{{ table_name }}_update
-        AFTER UPDATE ON {{ table_name }}
+    update_trigger_sql = f"""
+        CREATE TRIGGER IF NOT EXISTS trg_{table_name}_update
+        AFTER UPDATE ON {table_name}
         BEGIN
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({{ table_id }}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
-    """)
-    conn.execute(update_trigger.render(table_name=table_name, table_id=table_id))
+    """
+    conn.execute(update_trigger_sql)
 
     # Create DELETE trigger
-    delete_trigger = Template("""
-        CREATE TRIGGER IF NOT EXISTS trg_{{ table_name }}_delete
-        AFTER DELETE ON {{ table_name }}
+    delete_trigger_sql = f"""
+        CREATE TRIGGER IF NOT EXISTS trg_{table_name}_delete
+        AFTER DELETE ON {table_name}
         BEGIN
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({{ table_id }}, old.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, old.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
-    """)
-    conn.execute(delete_trigger.render(table_name=table_name, table_id=table_id))
+    """
+    conn.execute(delete_trigger_sql)
 
 
 @contextmanager
@@ -141,21 +139,9 @@ def changeset(
         Changeset containing UpsertOp and DeleteOp operations for each table.
     """
 
-    # Template for changeset query
+    # Query template for changeset generation
     # This query joins each application table with the changes table to either
     # acquire the new row version or report the row as deleted.
-    changeset_template = Template("""
-    SELECT
-        IFNULL(base.rowid, changes.rid) AS rowid,
-        CASE
-            WHEN base.rowid IS NULL THEN 'delete'
-            ELSE 'upsert'
-        END AS operation,
-        base.*
-    FROM
-        (SELECT * FROM changes WHERE tid = {{ table_id }}) AS changes
-        LEFT JOIN {{ table_name }} AS base ON base.rowid = changes.rid
-    """)
 
     changeset_data = {}
     snapshot_gsn = 0
@@ -167,9 +153,18 @@ def changeset(
         snapshot_gsn = cursor.fetchone()[0]
 
         for table_name, table_id in table_mapping.items():
-            sql = changeset_template.render(
-                table_name=table_name, table_id=table_id
-            ).strip()
+            sql = f"""
+                SELECT
+                    IFNULL(base.rowid, changes.rid) AS rowid,
+                    CASE
+                        WHEN base.rowid IS NULL THEN 'delete'
+                        ELSE 'upsert'
+                    END AS operation,
+                    base.*
+                FROM
+                    (SELECT * FROM changes WHERE tid = {table_id}) AS changes
+                    LEFT JOIN {table_name} AS base ON base.rowid = changes.rid
+            """.strip()
 
             cursor = conn.execute(sql)
             columns = [description[0] for description in cursor.description]
