@@ -23,7 +23,12 @@ import fossil_delta
 # Add parent directory to path to import testlib
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from testlib import compute_hash_from_rows, compute_table_hash, sqlite3_test_db
+from testlib import (
+    compute_hash_from_rows,
+    compute_table_hash,
+    generate_random_workload,
+    sqlite3_test_db,
+)
 
 
 @dataclass
@@ -353,50 +358,6 @@ def compute_id_data_hash(conn: sqlite3.Connection, table_name: str, debug: bool 
     return compute_hash_from_rows(cursor, debug)
 
 
-def generate_random_workload(max_id: int, seed: int) -> Iterator[tuple]:
-    """
-    Generate a random workload of insert, update, and delete operations.
-
-    This generator produces a stream of operation tuples that randomly
-    insert, update, and delete rows with IDs in the range [1, max_id].
-    The bounded ID space ensures the dataset doesn't grow unbounded.
-
-    Args:
-        max_id: Maximum ID value to use (keeps dataset bounded)
-        seed: Random seed for reproducible workloads
-
-    Yields:
-        tuple: (operation_type, row_id, data) where operation_type is "insert", "update", or "delete"
-    """
-    if seed is not None:
-        random.seed(seed)
-
-    # Track which IDs exist to make deletes and updates more meaningful
-    existing_ids = set()
-
-    while True:
-        operation_type = random.choice(["insert", "update", "delete"])
-
-        if operation_type == "insert" and len(existing_ids) <= max_id:
-            # Create a new row
-            row_id = random.randint(1, max_id)
-            data = f"data_{row_id}_v{random.randint(1, 1000)}"
-            existing_ids.add(row_id)
-            yield ("upsert", row_id, data)
-
-        elif operation_type == "update" and existing_ids:
-            # Update an existing row
-            target_id = random.choice(list(existing_ids))
-            data = f"updated_data_{target_id}_v{random.randint(1, 1000)}"
-            yield ("upsert", target_id, data)
-
-        elif operation_type == "delete" and existing_ids:
-            # Delete an existing row
-            target_id = random.choice(list(existing_ids))
-            existing_ids.discard(target_id)
-            yield ("delete", target_id, "")
-
-
 def apply_changeset_operation(
     conn: sqlite3.Connection, table_name: str, operation: ChangesetOp
 ) -> None:
@@ -473,7 +434,7 @@ def apply_operation_to_regular_table(
 
 def test_random_workload(
     seed: int | None = None,
-    duration_seconds: float = 3.0,
+    duration_seconds: float = 2.0,
     max_id: int = 100,
     replication_probability: float = 0.1,
 ) -> None:

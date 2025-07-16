@@ -7,6 +7,7 @@ different CDC patterns to avoid code duplication.
 
 import contextlib
 import hashlib
+import random
 import sqlite3
 import struct
 from contextlib import contextmanager
@@ -95,3 +96,47 @@ def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = 
     cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
 
     return compute_hash_from_rows(cursor, debug)
+
+
+def generate_random_workload(max_id: int, seed: int) -> Iterator[tuple]:
+    """
+    Generate a random workload of insert, update, and delete operations.
+
+    This generator produces a stream of operation tuples that randomly
+    insert, update, and delete rows with IDs in the range [1, max_id].
+    The bounded ID space ensures the dataset doesn't grow unbounded.
+
+    Args:
+        max_id: Maximum ID value to use (keeps dataset bounded)
+        seed: Random seed for reproducible workloads
+
+    Yields:
+        tuple: (operation_type, row_id, data) where operation_type is "upsert" or "delete"
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # Track which IDs exist to make deletes and updates more meaningful
+    existing_ids = set()
+
+    while True:
+        operation_type = random.choice(["insert", "update", "delete"])
+
+        if operation_type == "insert" and len(existing_ids) <= max_id:
+            # Create a new row
+            row_id = random.randint(1, max_id)
+            data = f"data_{row_id}_v{random.randint(1, 1000)}"
+            existing_ids.add(row_id)
+            yield ("upsert", row_id, data)
+
+        elif operation_type == "update" and existing_ids:
+            # Update an existing row
+            target_id = random.choice(list(existing_ids))
+            data = f"updated_data_{target_id}_v{random.randint(1, 1000)}"
+            yield ("upsert", target_id, data)
+
+        elif operation_type == "delete" and existing_ids:
+            # Delete an existing row
+            target_id = random.choice(list(existing_ids))
+            existing_ids.discard(target_id)
+            yield ("delete", target_id, "")

@@ -9,17 +9,19 @@ This code is not intended for production use, but serves as a demonstration of
 the pattern and tests its correctness.
 """
 
+import random
 import sqlite3
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Union
+from typing import Any, Dict, Iterator, List, Literal, Union
 
 # Add parent directory to path to import testlib
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from testlib import compute_table_hash, sqlite3_test_db
+from testlib import compute_table_hash, generate_random_workload, sqlite3_test_db
 
 
 @dataclass
@@ -279,6 +281,174 @@ def create_example_tables(conn: sqlite3.Connection) -> Dict[str, int]:
 
     # Return table mapping for changeset operations
     return {"AppTable": 1, "AppTableExplicitRowid": 2}
+
+
+def setup_workload_table(conn: sqlite3.Connection, table_name: str) -> str:
+    """
+    Create a simple table for workload testing.
+
+    This creates a simple table with:
+    - id INTEGER: primary key
+    - data TEXT: single data column
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table to create
+
+    Returns:
+        The name of the created table.
+    """
+    sql = f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id INTEGER PRIMARY KEY,
+            data TEXT
+        )
+    """
+    conn.execute(sql)
+    return table_name
+
+
+def apply_operation_to_workload_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    operation: Literal["upsert", "delete"],
+    rowid: int,
+    data: str = "",
+) -> None:
+    """
+    Apply an operation to a workload table.
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table
+        operation: The operation to apply
+        rowid: Primary key value for the operation
+        data: Data value for insert/update operations (default empty string)
+    """
+    if operation == "upsert":
+        # Insert or update (upsert)
+        sql = f"""
+            INSERT INTO {table_name} (id, data)
+            VALUES (?, ?)
+            ON CONFLICT (id) DO UPDATE SET data = excluded.data
+        """
+        conn.execute(sql, (rowid, data))
+    elif operation == "delete":
+        # Delete the row
+        sql = f"DELETE FROM {table_name} WHERE id = ?"
+        conn.execute(sql, (rowid,))
+
+
+def test_random_workload(
+    seed: int | None = None,
+    duration_seconds: float = 2.0,
+    max_id: int = 100,
+    replication_probability: float = 0.1,
+) -> None:
+    """
+    Test the trigger-lite pattern with a random workload.
+
+    This test:
+    1. Applies a random workload stream to a trigger-lite table
+    2. Applies the same stream to a regular table (without trigger-lite tracking)
+    3. Replicates the trigger-lite table to a second database using changesets
+    4. Sends changesets to the replica with some probability after each operation
+    5. Runs for a configurable duration
+    6. Compares the hash of all three tables
+
+    Args:
+        seed: Random seed for reproducible results
+        duration_seconds: How long to run the workload
+        max_id: Maximum ID value to use in workload
+        replication_probability: Probability of sending changeset to replica after each op
+    """
+
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+
+    print(f"  Running random workload test for {duration_seconds} seconds...")
+    print(
+        f"  Using max_id={max_id}, replication_probability={replication_probability}, seed={seed}"
+    )
+
+    # Create databases
+    with (
+        sqlite3_test_db() as writer_conn,
+        sqlite3_test_db() as replica_conn,
+        sqlite3_test_db() as regular_conn,
+    ):
+        # Set up changes table for writer and replica
+        setup_changes_table(writer_conn)
+        setup_changes_table(replica_conn)
+
+        # Set up tables
+        writer_table = setup_workload_table(writer_conn, "WorkloadTable")
+        setup_triggers(writer_conn, writer_table, table_id=1)
+        replica_table = setup_workload_table(replica_conn, "WorkloadTable")
+        setup_triggers(replica_conn, replica_table, table_id=1)
+        regular_table = setup_workload_table(regular_conn, "WorkloadTable")
+
+        # Table mapping for changesets
+        table_mapping = {"WorkloadTable": 1}
+
+        # Counters
+        operation_count = 0
+        changeset_count = 0
+
+        # Generate workload and apply it
+        start_time = time.time()
+        workload_gen = generate_random_workload(max_id, seed)
+
+        while time.time() - start_time < duration_seconds:
+            # Get next operation
+            operation_type, row_id, data = next(workload_gen)
+            operation_count += 1
+
+            # Apply to trigger-lite table
+            apply_operation_to_workload_table(
+                writer_conn, writer_table, operation_type, row_id, data
+            )
+
+            # Apply operation to regular table
+            apply_operation_to_workload_table(
+                regular_conn, regular_table, operation_type, row_id, data
+            )
+
+            # Randomly decide whether to replicate
+            if random.random() < replication_probability:
+                changeset_count += 1
+                # Generate changeset and apply to replica
+                with changeset(writer_conn, table_mapping) as changeset_ops:
+                    for op in changeset_ops["WorkloadTable"]:
+                        apply_changeset_operation(replica_conn, replica_table, op)
+
+        # Final replication to ensure replica is up to date
+        with changeset(writer_conn, table_mapping) as final_changeset:
+            changeset_count += 1
+            for op in final_changeset["WorkloadTable"]:
+                apply_changeset_operation(replica_conn, replica_table, op)
+
+        print(f"  Applied {operation_count} operations in {time.time() - start_time:.2f} seconds")
+        print(f"  Applied {changeset_count} changesets to replica")
+
+        # Compute hashes of all three tables
+        writer_hash = compute_table_hash(writer_conn, writer_table)
+        replica_hash = compute_table_hash(replica_conn, replica_table)
+        regular_hash = compute_table_hash(regular_conn, regular_table)
+
+        print(f"  Writer hash:  {writer_hash}")
+        print(f"  Replica hash: {replica_hash}")
+        print(f"  Regular hash: {regular_hash}")
+
+        # All tables should have the same content
+        assert writer_hash == replica_hash, (
+            f"Writer and replica hashes don't match: {writer_hash} != {replica_hash}"
+        )
+        assert writer_hash == regular_hash, (
+            f"Writer and regular hashes don't match: {writer_hash} != {regular_hash}"
+        )
+
+        print("  ✓ All table hashes match! Random workload test passed.")
 
 
 def run_example() -> None:
@@ -847,6 +1017,7 @@ def test_pattern():
     test_explicit_rowid_table()
     test_replication()
     test_foreign_key_cascade()
+    test_random_workload()
     print("✅ All tests passed!")
 
 
