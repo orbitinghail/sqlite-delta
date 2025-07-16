@@ -11,13 +11,16 @@ the pattern and tests its correctness.
 
 import contextlib
 import hashlib
+import random
 import sqlite3
 import struct
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Union
 
 import fossil_delta
+from typing_extensions import Literal
 
 
 @contextmanager
@@ -93,6 +96,31 @@ def setup_three_phase_table(conn: sqlite3.Connection, table_name: str) -> str:
             -- The primary key must include phase, as there are now up to 3 copies
             -- of each row depending on snapshot state
             PRIMARY KEY (id, phase)
+        )
+    """
+    conn.execute(sql)
+    return table_name
+
+
+def setup_regular_table(conn: sqlite3.Connection, table_name: str) -> str:
+    """
+    Create a regular table without three-phase columns.
+
+    This creates a simple table with:
+    - id INTEGER: primary key
+    - data BLOB: single data column
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table to create
+
+    Returns:
+        The name of the created table.
+    """
+    sql = f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id INTEGER PRIMARY KEY,
+            data BLOB
         )
     """
     conn.execute(sql)
@@ -310,39 +338,22 @@ def compact(conn: sqlite3.Connection, table_name: str) -> None:
         conn.execute(f"UPDATE {table_name} SET phase = 2")
 
 
-def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
+def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
     """
-    Compute a SHA256 hash of a table's contents for verification.
+    Compute a SHA256 hash from an iterator of row tuples.
 
-    Scans the table in default row order (typically primary key order), and
-    hashes each cell with an explicit type prefix to ensure deterministic output.
+    Hashes each cell with an explicit type prefix to ensure deterministic output.
 
     Args:
-        conn: SQLite database connection
-        table_name: Name of the table to hash
+        rows: Iterator of row tuples
+        debug: Whether to print debug information
 
     Returns:
         Hex string of the SHA256 hash
     """
     hasher = hashlib.sha256()
 
-    # Get ordered list of column names
-    schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
-    pk_columns = []
-    for col in schema_cursor.fetchall():
-        _, name, _, _, _, pk = col
-        # pk is the position in primary key (1-based), 0 means not part of PK
-        if pk > 0:
-            pk_columns.append((pk, name))
-
-    # Sort PK columns by their position in the primary key
-    pk_columns.sort(key=lambda x: x[0])
-    order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
-
-    # Rely on SQLite's default row order (by PK or ROWID)
-    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
-
-    for row in cursor:
+    for row in rows:
         if debug:
             print(f"Row: {row}")
 
@@ -368,6 +379,103 @@ def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = 
                 raise TypeError(f"Unsupported type in table: {type(cell)}")
 
     return hasher.hexdigest()
+
+
+def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
+    """
+    Compute a SHA256 hash of a table's contents for verification.
+
+    Scans the table in default row order (typically primary key order), and
+    hashes each cell with an explicit type prefix to ensure deterministic output.
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table to hash
+        debug: Whether to print debug information
+
+    Returns:
+        Hex string of the SHA256 hash
+    """
+    # Get ordered list of column names
+    schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
+    pk_columns = []
+    for col in schema_cursor.fetchall():
+        _, name, _, _, _, pk = col
+        # pk is the position in primary key (1-based), 0 means not part of PK
+        if pk > 0:
+            pk_columns.append((pk, name))
+
+    # Sort PK columns by their position in the primary key
+    pk_columns.sort(key=lambda x: x[0])
+    order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
+
+    # Rely on SQLite's default row order (by PK or ROWID)
+    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
+
+    return compute_hash_from_rows(cursor, debug)
+
+
+def compute_id_data_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
+    """
+    Compute a SHA256 hash of only the id and data columns from a table.
+
+    This function can be used to compare tables that have different schemas
+    but should contain the same id/data pairs.
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table to hash
+        debug: Whether to print debug information
+
+    Returns:
+        Hex string of the SHA256 hash
+    """
+    cursor = conn.execute(f"SELECT id, data FROM {table_name} ORDER BY id")
+    return compute_hash_from_rows(cursor, debug)
+
+
+def generate_random_workload(max_id: int, seed: int) -> Iterator[tuple]:
+    """
+    Generate a random workload of insert, update, and delete operations.
+
+    This generator produces a stream of operation tuples that randomly
+    insert, update, and delete rows with IDs in the range [1, max_id].
+    The bounded ID space ensures the dataset doesn't grow unbounded.
+
+    Args:
+        max_id: Maximum ID value to use (keeps dataset bounded)
+        seed: Random seed for reproducible workloads
+
+    Yields:
+        tuple: (operation_type, row_id, data) where operation_type is "insert", "update", or "delete"
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # Track which IDs exist to make deletes and updates more meaningful
+    existing_ids = set()
+
+    while True:
+        operation_type = random.choice(["insert", "update", "delete"])
+
+        if operation_type == "insert" and len(existing_ids) <= max_id:
+            # Create a new row
+            row_id = random.randint(1, max_id)
+            data = f"data_{row_id}_v{random.randint(1, 1000)}"
+            existing_ids.add(row_id)
+            yield ("upsert", row_id, data)
+
+        elif operation_type == "update" and existing_ids:
+            # Update an existing row
+            target_id = random.choice(list(existing_ids))
+            data = f"updated_data_{target_id}_v{random.randint(1, 1000)}"
+            yield ("upsert", target_id, data)
+
+        elif operation_type == "delete" and existing_ids:
+            # Delete an existing row
+            target_id = random.choice(list(existing_ids))
+            existing_ids.discard(target_id)
+            yield ("delete", target_id, "")
 
 
 def apply_changeset_operation(
@@ -411,6 +519,146 @@ def apply_changeset_operation(
         # Remove the phase=2 row completely for deletes
         sql = f"DELETE FROM {table_name} WHERE id = ? AND phase = 2"
         conn.execute(sql, (operation.id,))
+
+
+def apply_operation_to_regular_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    operation: Literal["upsert", "delete"],
+    rowid: int,
+    data: str = "",
+) -> None:
+    """
+    Apply an operation to a regular table (without three-phase columns).
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the regular table
+        operation: The operation to apply
+        rowid: Primary key value for the operation
+        data: Data value for insert/update operations (default empty string)
+    """
+    if operation == "upsert":
+        # Insert or update (upsert)
+        sql = f"""
+            INSERT INTO {table_name} (id, data)
+            VALUES (?, ?)
+            ON CONFLICT (id) DO UPDATE SET data = excluded.data
+        """
+        conn.execute(sql, (rowid, data))
+    elif operation == "delete":
+        # Delete the row
+        sql = f"DELETE FROM {table_name} WHERE id = ?"
+        conn.execute(sql, (rowid,))
+
+
+def test_random_workload(
+    seed: int | None = None,
+    duration_seconds: float = 3.0,
+    max_id: int = 100,
+    replication_probability: float = 0.1,
+) -> None:
+    """
+    Test the three-phase pattern with a random workload.
+
+    This test:
+    1. Applies a random workload stream to a three-phase table
+    2. Applies the same stream to a regular table (without three-phase columns)
+    3. Replicates the three-phase table to a second database using changesets
+    4. Sends changesets to the replica with some probability after each operation
+    5. Runs for a configurable duration
+    6. Compacts both three-phase tables after the workload
+    7. Compares the hash of all three tables
+
+    Args:
+        seed: Random seed for reproducible results
+        duration_seconds: How long to run the workload
+        max_id: Maximum ID value to use in workload
+        replication_probability: Probability of sending changeset to replica after each op
+    """
+
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+
+    print(f"  Running random workload test for {duration_seconds} seconds...")
+    print(
+        f"  Using max_id={max_id}, replication_probability={replication_probability}, seed={seed}"
+    )
+
+    # Create databases
+    with (
+        sqlite3_test_db() as writer_conn,
+        sqlite3_test_db() as replica_conn,
+        sqlite3_test_db() as regular_conn,
+    ):
+        # Set up tables
+        writer_table = setup_three_phase_table(writer_conn, "WorkloadTable")
+        replica_table = setup_three_phase_table(replica_conn, "WorkloadTable")
+        regular_table = setup_regular_table(regular_conn, "WorkloadTable")
+
+        # Counters
+        operation_count = 0
+        changeset_count = 0
+
+        # Generate workload and apply it
+        start_time = time.time()
+        workload_gen = generate_random_workload(max_id, seed)
+
+        while time.time() - start_time < duration_seconds:
+            # Get next operation
+            operation_type, row_id, data = next(workload_gen)
+            operation_count += 1
+
+            # Apply to three-phase table
+            if operation_type == "upsert":
+                insert_or_update(writer_conn, writer_table, row_id, data)
+            elif operation_type == "delete":
+                logical_delete(writer_conn, writer_table, row_id)
+
+            # Apply operation to regular table
+            apply_operation_to_regular_table(
+                regular_conn, regular_table, operation_type, row_id, data
+            )
+
+            # Randomly decide whether to replicate
+            if random.random() < replication_probability:
+                changeset_count += 1
+                # Generate changeset and apply to replica
+                with changeset(writer_conn, writer_table) as changeset_ops:
+                    for op in changeset_ops:
+                        apply_changeset_operation(replica_conn, replica_table, op)
+
+        # Final replication to ensure replica is up to date
+        with changeset(writer_conn, writer_table) as final_changeset:
+            changeset_count += 1
+            for op in final_changeset:
+                apply_changeset_operation(replica_conn, replica_table, op)
+
+        print(f"  Applied {operation_count} operations in {time.time() - start_time:.2f} seconds")
+        print(f"  Applied {changeset_count} changesets to replica")
+
+        # Compact both three-phase tables
+        compact(writer_conn, writer_table)
+        compact(replica_conn, replica_table)
+
+        # Compute hashes of all three tables (comparing only id+data columns)
+        writer_hash = compute_id_data_hash(writer_conn, writer_table)
+        replica_hash = compute_id_data_hash(replica_conn, replica_table)
+        regular_hash = compute_id_data_hash(regular_conn, regular_table)
+
+        print(f"  Writer hash:  {writer_hash}")
+        print(f"  Replica hash: {replica_hash}")
+        print(f"  Regular hash: {regular_hash}")
+
+        # All tables should have the same id+data content
+        assert writer_hash == replica_hash, (
+            f"Writer and replica hashes don't match: {writer_hash} != {replica_hash}"
+        )
+        assert writer_hash == regular_hash, (
+            f"Writer and regular hashes don't match: {writer_hash} != {regular_hash}"
+        )
+
+        print("  ✓ All table hashes match! Random workload test passed.")
 
 
 def run_example() -> None:
@@ -879,6 +1127,7 @@ def test_pattern():
     test_phase_isolation()
     test_compact()
     test_crash_safety()
+    test_random_workload()
     print("✅ All tests passed!")
 
 
