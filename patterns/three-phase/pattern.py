@@ -318,7 +318,8 @@ def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = 
     pk_columns = []
     for col in schema_cursor.fetchall():
         _, name, _, _, _, pk = col
-        if pk > 0:  # pk is the position in primary key (1-based), 0 means not part of PK
+        # pk is the position in primary key (1-based), 0 means not part of PK
+        if pk > 0:
             pk_columns.append((pk, name))
 
     # Sort PK columns by their position in the primary key

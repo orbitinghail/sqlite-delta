@@ -124,9 +124,7 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
 
 
 @contextmanager
-def changeset(
-    conn: sqlite3.Connection, table_mapping: Dict[str, int]
-) -> Iterator[Changeset]:
+def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterator[Changeset]:
     """
     Context manager for atomic changeset generation and cleanup.
 
@@ -278,9 +276,7 @@ def run_example() -> None:
 
         # Make some updates
         conn.execute("UPDATE AppTable SET t = 'data 1; revision 2' WHERE id = 1")
-        conn.execute(
-            "UPDATE AppTableExplicitRowid SET t = 'data 1; revision 2' WHERE id = 'id1'"
-        )
+        conn.execute("UPDATE AppTableExplicitRowid SET t = 'data 1; revision 2' WHERE id = 'id1'")
 
         # Delete a row
         conn.execute("DELETE FROM AppTable WHERE id = 5")
@@ -318,9 +314,7 @@ def test_pattern():
             setup_changes_table(conn)
 
             # Create test table and define table mapping
-            conn.execute(
-                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
-            )
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
             table_mapping = {"users": 1}
             setup_triggers(conn, "users", table_id=table_mapping["users"])
 
@@ -328,9 +322,7 @@ def test_pattern():
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')"
             )
-            conn.execute(
-                "INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')"
-            )
+            conn.execute("INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')")
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (3, 'Charlie', 'charlie@example.com')"
             )
@@ -339,9 +331,7 @@ def test_pattern():
             conn.execute("DELETE FROM changes")
 
             # Make changes
-            conn.execute(
-                "UPDATE users SET email = 'alice.updated@example.com' WHERE id = 1"
-            )
+            conn.execute("UPDATE users SET email = 'alice.updated@example.com' WHERE id = 1")
             conn.execute("DELETE FROM users WHERE id = 3")
             conn.execute(
                 "INSERT INTO users (id, name, email) VALUES (4, 'David', 'david@example.com')"
@@ -352,9 +342,7 @@ def test_pattern():
                 operations = changeset_data["users"]
 
                 # Should have operations for all modified rows
-                assert len(operations) == 3, (
-                    f"Expected 3 operations, got {len(operations)}"
-                )
+                assert len(operations) == 3, f"Expected 3 operations, got {len(operations)}"
 
                 # Check operation types
                 upserts = [op for op in operations if isinstance(op, UpsertOp)]
@@ -365,9 +353,7 @@ def test_pattern():
 
                 # Verify delete operation
                 delete_op = deletes[0]
-                assert delete_op.rowid == 3, (
-                    f"Expected delete rowid=3, got {delete_op.rowid}"
-                )
+                assert delete_op.rowid == 3, f"Expected delete rowid=3, got {delete_op.rowid}"
 
                 # Verify upsert data includes all columns
                 alice_op = next(op for op in upserts if op.data.get("id") == 1)
@@ -382,9 +368,7 @@ def test_pattern():
 
             # Create multiple tables and define table mapping
             conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-            conn.execute(
-                "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, user_id INTEGER)"
-            )
+            conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, user_id INTEGER)")
             table_mapping = {"users": 1, "posts": 2}
 
             setup_triggers(conn, "users", table_id=table_mapping["users"])
@@ -410,15 +394,11 @@ def test_pattern():
 
                 # Check users changes
                 users_ops = changeset_data["users"]
-                assert len(users_ops) == 1, (
-                    f"Expected 1 user operation, got {len(users_ops)}"
-                )
+                assert len(users_ops) == 1, f"Expected 1 user operation, got {len(users_ops)}"
 
                 # Check posts changes
                 posts_ops = changeset_data["posts"]
-                assert len(posts_ops) == 1, (
-                    f"Expected 1 post operation, got {len(posts_ops)}"
-                )
+                assert len(posts_ops) == 1, f"Expected 1 post operation, got {len(posts_ops)}"
 
                 # Verify we have a delete operation for posts
                 post_deletes = [op for op in posts_ops if isinstance(op, DeleteOp)]
@@ -443,22 +423,16 @@ def test_pattern():
             # Verify changes exist
             cursor = conn.execute("SELECT COUNT(*) FROM changes")
             initial_count = cursor.fetchone()[0]
-            assert initial_count == 2, (
-                f"Expected 2 initial changes, got {initial_count}"
-            )
+            assert initial_count == 2, f"Expected 2 initial changes, got {initial_count}"
 
             # Generate changeset (should clean up)
             with changeset(conn, table_mapping) as changeset_data:
-                assert len(changeset_data["test_table"]) == 2, (
-                    "Expected 2 operations in changeset"
-                )
+                assert len(changeset_data["test_table"]) == 2, "Expected 2 operations in changeset"
 
             # Verify changes were cleaned up
             cursor = conn.execute("SELECT COUNT(*) FROM changes")
             remaining_count = cursor.fetchone()[0]
-            assert remaining_count == 0, (
-                f"Expected 0 remaining changes, got {remaining_count}"
-            )
+            assert remaining_count == 0, f"Expected 0 remaining changes, got {remaining_count}"
 
             # Add new changes after cleanup
             conn.execute("INSERT INTO test_table (id, data) VALUES (3, 'data3')")
@@ -486,9 +460,7 @@ def test_pattern():
             """)
             table_mapping = {"explicit_table": 1}
 
-            setup_triggers(
-                conn, "explicit_table", table_id=table_mapping["explicit_table"]
-            )
+            setup_triggers(conn, "explicit_table", table_id=table_mapping["explicit_table"])
 
             # Insert data
             conn.execute(
@@ -513,9 +485,7 @@ def test_pattern():
             # Generate changeset
             with changeset(conn, table_mapping) as changeset_data:
                 operations = changeset_data["explicit_table"]
-                assert len(operations) == 2, (
-                    f"Expected 2 operations, got {len(operations)}"
-                )
+                assert len(operations) == 2, f"Expected 2 operations, got {len(operations)}"
 
                 # Check for upsert and delete
                 upserts = [op for op in operations if isinstance(op, UpsertOp)]

@@ -1,10 +1,90 @@
-# Three-phase CDC pattern
+# Three-Phase CDC Pattern
+
+The three-phase pattern provides Change Data Capture (CDC) for SQLite tables using a triple-buffering approach with delta compression. It's designed for scenarios where delta compression is beneficial and atomic changeset generation is required.
+
+## How it works
+
+The pattern uses a versioning system with up to three phases (0, 1, 2) of each row to enable atomic changeset generation and delta compression.
+
+### 1. Three-Phase Table Structure
+
+Tables are augmented with phase and deleted columns to support versioning:
+
+```sql
+CREATE TABLE IF NOT EXISTS AppTable (
+    -- Application columns
+    id INTEGER,
+    data BLOB,
+
+    -- Three-phase pattern columns
+    phase INTEGER NOT NULL DEFAULT 0,  -- 0: new, 1: in-progress, 2: stable
+    deleted BOOL NOT NULL DEFAULT 0,   -- logical deletion flag
+
+    PRIMARY KEY (id, phase)  -- Multiple versions per logical row
+)
+```
+
+See [`setup_three_phase_table()`](pattern.py) for the implementation.
+
+### 2. Phase Management
+
+**Phase 0**: New rows and updates from application operations
+**Phase 1**: Rows being processed by an active changeset
+**Phase 2**: Stable rows that have been through changeset processing
+
+Application operations always target phase 0, while changeset generation works with phases 1 and 2.
+
+> [!TIP]
+> One way to reason about the three phases is to think of the rows compacting into phase 2 over time. It's loosly similar to how LSM trees compact tuples into lower-level layers.
+
+See [`insert_or_update()`](pattern.py) and [`logical_delete()`](pattern.py) for how to safely modify a three-phase table.
+
+### 3. Changeset Generation
+
+Generating a changeset must perform the following operations across three transactions:
+
+**Transaction 1**: Transition phase 0 rows to phase 1
+
+- delete any rows in phase 1 which have been updated by phase 0
+- update any rows in phase 0 to phase 1
+
+**Transaction 2 (readonly)**: Build the changeset
+
+- compare rows in phase 2 and phase 1
+- for rows which have changed (i.e. aren't inserts or deletes) use a delta-compression method to compute the delta
+- store inserts and deletes as is in the changeset
+
+**Transaction 3**: Cleanup
+
+- delete any dead phase=2 rows or phase=2 rows which have been modified in phase=1
+- update any rows in phase 1 to phase 2
+
+See [`changeset()`](pattern.py) for an example implementation which uses the fossil delta algorithm to compute differences.
+
+### 4. Checkpoint Generation
+
+Periodically compact the table to prevent unbounded growth of changesets. This operation runs in a transaction and performs two operations:
+
+1. delete all rows which are logically deleted or are not the latest version
+2. update all rows to phase=2
+
+See [`compact()`](pattern.py) for the implementation.
+
+## Requirements
+
+- **Phase column**: Primary key must include the phase column
+- **WAL mode**: Recommended for concurrent access during changeset generation
 
 ## Best suited for
 
-- tables with very wide rows that would benefit from delta compression.
-- key/value workloads; the additional phase column increases the cost and complexity of table scans.
+- Tables with very wide rows that would benefit from delta compression
+- Key/value workloads where the additional complexity of multi-version rows is easy to handle
+
+## Implementation Details
+
+See [`run_example()`](pattern.py) for a complete working example and the test functions for comprehensive usage patterns including crash recovery scenarios.
 
 ## Tweaks
 
-- Inline delta computation: extend SQLite with a function which performs the delta computation between two row versions during the checkpoint query. This may avoid extra data copies depending on how you are running the checkpoint query.
+- **Inline delta computation**: Extend SQLite with a function to perform delta computation during changeset queries (may avoid extra data copies)
+- **Alternative delta algorithms**: Replace fossil delta with other compression algorithms suited to your data

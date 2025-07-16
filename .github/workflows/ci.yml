@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run poe test
+
+      - name: Run linter
+        run: uv run poe lint
+
+      - name: Run formatter check
+        run: uv run poe fmt --check
