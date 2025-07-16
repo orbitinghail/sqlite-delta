@@ -16,10 +16,9 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Union
+from typing import Dict, Iterator, List, Literal, Union
 
 import fossil_delta
-from typing_extensions import Literal
 
 # Add parent directory to path to import testlib
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
