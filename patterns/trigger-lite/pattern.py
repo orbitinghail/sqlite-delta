@@ -222,6 +222,27 @@ def apply_changeset_operation(
         conn.execute(sql, (operation.rowid,))
 
 
+def apply_changeset(conn: sqlite3.Connection, changeset_data: Changeset) -> None:
+    """
+    Apply a complete changeset to a database connection.
+
+    This function wraps the changeset application in a transaction and temporarily
+    disables foreign key constraint validation to allow operations to be applied
+    in any order. This is necessary because changesets may contain operations that
+    would violate foreign key constraints if applied immediately (e.g., deleting
+    a parent row before its child rows, or inserting child rows before parent rows).
+
+    Args:
+        conn: SQLite database connection
+        changeset_data: Complete changeset containing operations for all tables
+    """
+    with conn:
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        for table_name, operations in changeset_data.items():
+            for operation in operations:
+                apply_changeset_operation(conn, table_name, operation)
+
+
 def create_example_tables(conn: sqlite3.Connection) -> Dict[str, int]:
     """
     Create example application tables for demonstration.
@@ -559,8 +580,7 @@ def test_pattern():
 
             # Generate changeset and apply to replica
             with changeset(writer_conn, table_mapping) as changeset_data:
-                for operation in changeset_data["AppTable"]:
-                    apply_changeset_operation(replica_conn, "AppTable", operation)
+                apply_changeset(replica_conn, changeset_data)
 
             # Verify tables match using hash comparison
             writer_hash = compute_table_hash(writer_conn, "AppTable")
@@ -575,8 +595,7 @@ def test_pattern():
             writer_conn.execute("DELETE FROM AppTable WHERE id = 4")  # Delete
 
             with changeset(writer_conn, table_mapping) as changeset_data:
-                for operation in changeset_data["AppTable"]:
-                    apply_changeset_operation(replica_conn, "AppTable", operation)
+                apply_changeset(replica_conn, changeset_data)
 
             # Verify tables match using hash comparison
             writer_hash = compute_table_hash(writer_conn, "AppTable")
@@ -595,16 +614,14 @@ def test_pattern():
             )
 
             with changeset(writer_conn, table_mapping) as changeset_data:
-                for operation in changeset_data["AppTable"]:
-                    apply_changeset_operation(replica_conn, "AppTable", operation)
+                apply_changeset(replica_conn, changeset_data)
 
             writer_conn.execute("DELETE FROM AppTable WHERE id = 3")  # Delete
             writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (8, 'data8_v1')")  # Insert
             writer_conn.execute("DELETE FROM AppTable WHERE id = 7")  # Delete what we just inserted
 
             with changeset(writer_conn, table_mapping) as changeset_data:
-                for operation in changeset_data["AppTable"]:
-                    apply_changeset_operation(replica_conn, "AppTable", operation)
+                apply_changeset(replica_conn, changeset_data)
 
             # Final verification using hash comparison
             writer_hash = compute_table_hash(writer_conn, "AppTable")
@@ -652,6 +669,176 @@ def test_pattern():
 
             print("✓ Replication test passed")
 
+    def test_foreign_key_cascade():
+        """Test replication with foreign key CASCADE DELETE."""
+        # Create writer and replica databases
+        with sqlite3_test_db() as writer_conn, sqlite3_test_db() as replica_conn:
+            # Enable foreign key constraints
+            writer_conn.execute("PRAGMA foreign_keys = ON")
+            replica_conn.execute("PRAGMA foreign_keys = ON")
+
+            # Setup both databases with identical schema
+            setup_changes_table(writer_conn)
+            setup_changes_table(replica_conn)
+
+            # Create parent and child tables with foreign key relationship
+            schema_queries = [
+                """
+                CREATE TABLE authors (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE articles (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
+                )
+                """,
+            ]
+
+            for conn in [writer_conn, replica_conn]:
+                for query in schema_queries:
+                    conn.execute(query)
+
+            # Define table mapping
+            table_mapping = {"authors": 1, "articles": 2}
+
+            # Setup triggers on both databases
+            setup_triggers(writer_conn, "authors", table_id=table_mapping["authors"])
+            setup_triggers(writer_conn, "articles", table_id=table_mapping["articles"])
+            setup_triggers(replica_conn, "authors", table_id=table_mapping["authors"])
+            setup_triggers(replica_conn, "articles", table_id=table_mapping["articles"])
+
+            # === CHECKPOINT 1: Initial data ===
+            print("  Checkpoint 1: Initial data with foreign key relationships")
+
+            # Insert authors
+            writer_conn.executemany(
+                "INSERT INTO authors (id, name) VALUES (?, ?)",
+                [(1, "Alice"), (2, "Bob"), (3, "Charlie")],
+            )
+
+            # Insert articles
+            writer_conn.executemany(
+                "INSERT INTO articles (id, title, author_id) VALUES (?, ?, ?)",
+                [
+                    (1, "Article 1 by Alice", 1),
+                    (2, "Article 2 by Alice", 1),
+                    (3, "Article 3 by Bob", 2),
+                    (4, "Article 4 by Charlie", 3),
+                    (5, "Article 5 by Charlie", 3),
+                ],
+            )
+
+            # Generate changeset and apply to replica
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                apply_changeset(replica_conn, changeset_data)
+
+            # Verify tables match
+            for table_name in ["authors", "articles"]:
+                writer_hash = compute_table_hash(writer_conn, table_name)
+                replica_hash = compute_table_hash(replica_conn, table_name)
+                assert writer_hash == replica_hash, (
+                    f"Tables {table_name} don't match after checkpoint 1"
+                )
+
+            # === CHECKPOINT 2: CASCADE DELETE test ===
+            print("  Checkpoint 2: Testing cascade delete")
+
+            # Delete author with id=1, which should cascade delete articles 1 and 2
+            writer_conn.execute("DELETE FROM authors WHERE id = 1")
+
+            # Verify cascade worked on writer
+            remaining_articles = writer_conn.execute(
+                "SELECT COUNT(*) FROM articles WHERE author_id = 1"
+            ).fetchone()[0]
+            assert remaining_articles == 0, "Cascade delete did not work on writer"
+
+            # Apply changeset to replica with deferred foreign key constraints
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                apply_changeset(replica_conn, changeset_data)
+
+            # Verify tables match after cascade delete
+            for table_name in ["authors", "articles"]:
+                writer_hash = compute_table_hash(writer_conn, table_name)
+                replica_hash = compute_table_hash(replica_conn, table_name)
+                assert writer_hash == replica_hash, (
+                    f"Tables {table_name} don't match after cascade delete"
+                )
+
+            # === CHECKPOINT 3: Mixed operations with more cascade deletes ===
+            print("  Checkpoint 3: Mixed operations with multiple cascade deletes")
+
+            # Add new author and articles
+            writer_conn.execute("INSERT INTO authors (id, name) VALUES (4, 'David')")
+            writer_conn.executemany(
+                "INSERT INTO articles (id, title, author_id) VALUES (?, ?, ?)",
+                [
+                    (6, "Article 6 by David", 4),
+                    (7, "Article 7 by David", 4),
+                    (8, "Article 8 by Bob", 2),
+                ],
+            )
+
+            # Update existing article
+            writer_conn.execute("UPDATE articles SET title = 'Updated Article 3' WHERE id = 3")
+
+            # Delete another author (Bob), which should cascade delete articles 3 and 8
+            writer_conn.execute("DELETE FROM authors WHERE id = 2")
+
+            # Apply changeset to replica with deferred foreign key constraints
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                apply_changeset(replica_conn, changeset_data)
+
+            # Final verification
+            for table_name in ["authors", "articles"]:
+                writer_hash = compute_table_hash(writer_conn, table_name)
+                replica_hash = compute_table_hash(replica_conn, table_name)
+                assert writer_hash == replica_hash, (
+                    f"Tables {table_name} don't match after final checkpoint"
+                )
+
+            # Verify final state manually
+            final_authors = writer_conn.execute(
+                "SELECT id, name FROM authors ORDER BY id"
+            ).fetchall()
+            expected_authors = [(3, "Charlie"), (4, "David")]
+            assert final_authors == expected_authors, (
+                f"Expected {expected_authors}, got {final_authors}"
+            )
+
+            final_articles = writer_conn.execute(
+                "SELECT id, title, author_id FROM articles ORDER BY id"
+            ).fetchall()
+            expected_articles = [
+                (4, "Article 4 by Charlie", 3),
+                (5, "Article 5 by Charlie", 3),
+                (6, "Article 6 by David", 4),
+                (7, "Article 7 by David", 4),
+            ]
+            assert final_articles == expected_articles, (
+                f"Expected {expected_articles}, got {final_articles}"
+            )
+
+            # Verify replica matches
+            replica_authors = replica_conn.execute(
+                "SELECT id, name FROM authors ORDER BY id"
+            ).fetchall()
+            replica_articles = replica_conn.execute(
+                "SELECT id, title, author_id FROM articles ORDER BY id"
+            ).fetchall()
+            assert replica_authors == expected_authors, (
+                f"Replica authors don't match: {replica_authors}"
+            )
+            assert replica_articles == expected_articles, (
+                f"Replica articles don't match: {replica_articles}"
+            )
+
+            print("✓ Foreign key cascade test passed")
+
     # Run all tests
     print("Running trigger-lite CDC pattern tests...")
     test_basic_changeset()
@@ -659,6 +846,7 @@ def test_pattern():
     test_changeset_cleanup()
     test_explicit_rowid_table()
     test_replication()
+    test_foreign_key_cascade()
     print("✅ All tests passed!")
 
 
