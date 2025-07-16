@@ -9,25 +9,22 @@ This code is not intended for production use, but serves as a demonstration of
 the pattern and tests its correctness.
 """
 
-import contextlib
-import hashlib
 import random
 import sqlite3
-import struct
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterator, List, Union
 
 import fossil_delta
 from typing_extensions import Literal
 
+# Add parent directory to path to import testlib
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-@contextmanager
-def sqlite3_test_db() -> Iterator[sqlite3.Connection]:
-    """Create an in-memory SQLite database with autocommit enabled."""
-    with contextlib.closing(sqlite3.connect(":memory:", autocommit=True)) as conn:
-        yield conn
+from testlib import compute_hash_from_rows, compute_table_hash, sqlite3_test_db
 
 
 @dataclass
@@ -336,83 +333,6 @@ def compact(conn: sqlite3.Connection, table_name: str) -> None:
 
         # Then update the remaining rows to phase 2
         conn.execute(f"UPDATE {table_name} SET phase = 2")
-
-
-def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
-    """
-    Compute a SHA256 hash from an iterator of row tuples.
-
-    Hashes each cell with an explicit type prefix to ensure deterministic output.
-
-    Args:
-        rows: Iterator of row tuples
-        debug: Whether to print debug information
-
-    Returns:
-        Hex string of the SHA256 hash
-    """
-    hasher = hashlib.sha256()
-
-    for row in rows:
-        if debug:
-            print(f"Row: {row}")
-
-        for cell in row:
-            if cell is None:
-                hasher.update(b"n")
-            elif isinstance(cell, int):
-                hasher.update(b"i")
-                hasher.update(struct.pack("<q", cell))
-            elif isinstance(cell, float):
-                hasher.update(b"f")
-                hasher.update(struct.pack("<d", cell))
-            elif isinstance(cell, str):
-                encoded = cell.encode("utf-8")
-                hasher.update(b"s")
-                hasher.update(struct.pack("<I", len(encoded)))
-                hasher.update(encoded)
-            elif isinstance(cell, bytes):
-                hasher.update(b"b")
-                hasher.update(struct.pack("<I", len(cell)))
-                hasher.update(cell)
-            else:
-                raise TypeError(f"Unsupported type in table: {type(cell)}")
-
-    return hasher.hexdigest()
-
-
-def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
-    """
-    Compute a SHA256 hash of a table's contents for verification.
-
-    Scans the table in default row order (typically primary key order), and
-    hashes each cell with an explicit type prefix to ensure deterministic output.
-
-    Args:
-        conn: SQLite database connection
-        table_name: Name of the table to hash
-        debug: Whether to print debug information
-
-    Returns:
-        Hex string of the SHA256 hash
-    """
-    # Get ordered list of column names
-    schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
-    pk_columns = []
-    for col in schema_cursor.fetchall():
-        _, name, _, _, _, pk = col
-        # pk is the position in primary key (1-based), 0 means not part of PK
-        if pk > 0:
-            pk_columns.append((pk, name))
-
-    # Sort PK columns by their position in the primary key
-    pk_columns.sort(key=lambda x: x[0])
-    order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
-
-    # Rely on SQLite's default row order (by PK or ROWID)
-    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
-
-    return compute_hash_from_rows(cursor, debug)
 
 
 def compute_id_data_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:

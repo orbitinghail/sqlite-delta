@@ -1,1 +1,3 @@
 /.kosho**
+__pycache__
+*.pyc

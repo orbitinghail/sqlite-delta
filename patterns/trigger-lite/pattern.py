@@ -9,20 +9,17 @@ This code is not intended for production use, but serves as a demonstration of
 the pattern and tests its correctness.
 """
 
-import contextlib
-import hashlib
 import sqlite3
-import struct
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Union
 
+# Add parent directory to path to import testlib
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-@contextmanager
-def sqlite3_test_db() -> Iterator[sqlite3.Connection]:
-    """Create an in-memory SQLite database with autocommit enabled."""
-    with contextlib.closing(sqlite3.connect(":memory:", autocommit=True)) as conn:
-        yield conn
+from testlib import compute_table_hash, sqlite3_test_db
 
 
 @dataclass
@@ -192,66 +189,6 @@ def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterat
     else:
         # Clean up processed changes if the yield was successful
         conn.execute("DELETE FROM changes WHERE gsn <= ?", (snapshot_gsn,))
-
-
-def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
-    """
-    Compute a SHA256 hash of a table's contents for verification.
-
-    Scans the table in default row order (typically primary key order), and
-    hashes each cell with an explicit type prefix to ensure deterministic output.
-
-    Args:
-        conn: SQLite database connection
-        table_name: Name of the table to hash
-
-    Returns:
-        Hex string of the SHA256 hash
-    """
-    hasher = hashlib.sha256()
-
-    # Get ordered list of column names
-    schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
-    pk_columns = []
-    for col in schema_cursor.fetchall():
-        _, name, _, _, _, pk = col
-        # pk is the position in primary key (1-based), 0 means not part of PK
-        if pk > 0:
-            pk_columns.append((pk, name))
-
-    # Sort PK columns by their position in the primary key
-    pk_columns.sort(key=lambda x: x[0])
-    order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
-
-    # Rely on SQLite's default row order (by PK or ROWID)
-    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
-
-    for row in cursor:
-        if debug:
-            print(f"Row: {row}")
-
-        for cell in row:
-            if cell is None:
-                hasher.update(b"n")
-            elif isinstance(cell, int):
-                hasher.update(b"i")
-                hasher.update(struct.pack("<q", cell))
-            elif isinstance(cell, float):
-                hasher.update(b"f")
-                hasher.update(struct.pack("<d", cell))
-            elif isinstance(cell, str):
-                encoded = cell.encode("utf-8")
-                hasher.update(b"s")
-                hasher.update(struct.pack("<I", len(encoded)))
-                hasher.update(encoded)
-            elif isinstance(cell, bytes):
-                hasher.update(b"b")
-                hasher.update(struct.pack("<I", len(cell)))
-                hasher.update(cell)
-            else:
-                raise TypeError(f"Unsupported type in table: {type(cell)}")
-
-    return hasher.hexdigest()
 
 
 def apply_changeset_operation(
