@@ -10,7 +10,9 @@ the pattern and tests its correctness.
 """
 
 import contextlib
+import hashlib
 import sqlite3
+import struct
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Union
@@ -190,6 +192,97 @@ def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterat
     else:
         # Clean up processed changes if the yield was successful
         conn.execute("DELETE FROM changes WHERE gsn <= ?", (snapshot_gsn,))
+
+
+def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
+    """
+    Compute a SHA256 hash of a table's contents for verification.
+
+    Scans the table in default row order (typically primary key order), and
+    hashes each cell with an explicit type prefix to ensure deterministic output.
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table to hash
+
+    Returns:
+        Hex string of the SHA256 hash
+    """
+    hasher = hashlib.sha256()
+
+    # Get ordered list of column names
+    schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
+    pk_columns = []
+    for col in schema_cursor.fetchall():
+        _, name, _, _, _, pk = col
+        # pk is the position in primary key (1-based), 0 means not part of PK
+        if pk > 0:
+            pk_columns.append((pk, name))
+
+    # Sort PK columns by their position in the primary key
+    pk_columns.sort(key=lambda x: x[0])
+    order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
+
+    # Rely on SQLite's default row order (by PK or ROWID)
+    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
+
+    for row in cursor:
+        if debug:
+            print(f"Row: {row}")
+
+        for cell in row:
+            if cell is None:
+                hasher.update(b"n")
+            elif isinstance(cell, int):
+                hasher.update(b"i")
+                hasher.update(struct.pack("<q", cell))
+            elif isinstance(cell, float):
+                hasher.update(b"f")
+                hasher.update(struct.pack("<d", cell))
+            elif isinstance(cell, str):
+                encoded = cell.encode("utf-8")
+                hasher.update(b"s")
+                hasher.update(struct.pack("<I", len(encoded)))
+                hasher.update(encoded)
+            elif isinstance(cell, bytes):
+                hasher.update(b"b")
+                hasher.update(struct.pack("<I", len(cell)))
+                hasher.update(cell)
+            else:
+                raise TypeError(f"Unsupported type in table: {type(cell)}")
+
+    return hasher.hexdigest()
+
+
+def apply_changeset_operation(
+    conn: sqlite3.Connection, table_name: str, operation: ChangesetOp
+) -> None:
+    """
+    Apply a single changeset operation to a table.
+
+    This function is used for replication scenarios where changesets are applied
+    to a replica database.
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table
+        operation: The operation to apply
+    """
+    if isinstance(operation, UpsertOp):
+        # Build column list and values dynamically based on operation data
+        columns = list(operation.data.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        column_names = ", ".join(columns)
+        values = [operation.data[col] for col in columns]
+
+        sql = f"""
+            INSERT OR REPLACE INTO {table_name} (rowid, {column_names})
+            VALUES (?, {placeholders})
+        """
+        conn.execute(sql, [operation.rowid] + values)
+    elif isinstance(operation, DeleteOp):
+        sql = f"DELETE FROM {table_name} WHERE rowid = ?"
+        conn.execute(sql, (operation.rowid,))
 
 
 def create_example_tables(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -517,39 +610,25 @@ def test_pattern():
 
             # === CHECKPOINT 1: Initial data ===
             print("  Checkpoint 1: Initial data")
-            initial_data = [
-                (1, "data1_v1"),
-                (2, "data2_v1"),
-                (3, "data3_v1"),
-                (4, "data4_v1"),
-            ]
-
-            for row_id, data_value in initial_data:
-                writer_conn.execute(
-                    "INSERT INTO AppTable (id, data) VALUES (?, ?)", (row_id, data_value)
-                )
+            writer_conn.executemany(
+                "INSERT INTO AppTable (id, data) VALUES (?, ?)",
+                [
+                    (1, "data1_v1"),
+                    (2, "data2_v1"),
+                    (3, "data3_v1"),
+                    (4, "data4_v1"),
+                ],
+            )
 
             # Generate changeset and apply to replica
             with changeset(writer_conn, table_mapping) as changeset_data:
                 for operation in changeset_data["AppTable"]:
-                    if isinstance(operation, UpsertOp):
-                        replica_conn.execute(
-                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
-                            (operation.rowid, operation.data["id"], operation.data["data"]),
-                        )
-                    elif isinstance(operation, DeleteOp):
-                        replica_conn.execute(
-                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
-                        )
+                    apply_changeset_operation(replica_conn, "AppTable", operation)
 
-            # Verify tables match
-            writer_rows = writer_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            replica_rows = replica_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            assert writer_rows == replica_rows, "Tables don't match after checkpoint 1"
+            # Verify tables match using hash comparison
+            writer_hash = compute_table_hash(writer_conn, "AppTable")
+            replica_hash = compute_table_hash(replica_conn, "AppTable")
+            assert writer_hash == replica_hash, "Tables don't match after checkpoint 1"
 
             # === CHECKPOINT 2: Updates and new data ===
             print("  Checkpoint 2: Updates and new data")
@@ -560,44 +639,27 @@ def test_pattern():
 
             with changeset(writer_conn, table_mapping) as changeset_data:
                 for operation in changeset_data["AppTable"]:
-                    if isinstance(operation, UpsertOp):
-                        replica_conn.execute(
-                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
-                            (operation.rowid, operation.data["id"], operation.data["data"]),
-                        )
-                    elif isinstance(operation, DeleteOp):
-                        replica_conn.execute(
-                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
-                        )
+                    apply_changeset_operation(replica_conn, "AppTable", operation)
 
-            # Verify tables match
-            writer_rows = writer_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            replica_rows = replica_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            assert writer_rows == replica_rows, "Tables don't match after checkpoint 2"
+            # Verify tables match using hash comparison
+            writer_hash = compute_table_hash(writer_conn, "AppTable")
+            replica_hash = compute_table_hash(replica_conn, "AppTable")
+            assert writer_hash == replica_hash, "Tables don't match after checkpoint 2"
 
             # === CHECKPOINT 3: Complex changes ===
             print("  Checkpoint 3: Complex changes")
-            writer_conn.execute(
-                "UPDATE AppTable SET data = 'data1_v3' WHERE id = 1"
-            )  # Update again
-            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (6, 'data6_v1')")  # Insert
-            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (7, 'data7_v1')")  # Insert
+            writer_conn.execute("UPDATE AppTable SET data = 'data1_v3' WHERE id = 1")
+            writer_conn.executemany(
+                "INSERT INTO AppTable (id, data) VALUES (?, ?)",
+                [
+                    (6, "data6_v1"),
+                    (7, "data7_v1"),
+                ],
+            )
 
             with changeset(writer_conn, table_mapping) as changeset_data:
                 for operation in changeset_data["AppTable"]:
-                    if isinstance(operation, UpsertOp):
-                        replica_conn.execute(
-                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
-                            (operation.rowid, operation.data["id"], operation.data["data"]),
-                        )
-                    elif isinstance(operation, DeleteOp):
-                        replica_conn.execute(
-                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
-                        )
+                    apply_changeset_operation(replica_conn, "AppTable", operation)
 
             writer_conn.execute("DELETE FROM AppTable WHERE id = 3")  # Delete
             writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (8, 'data8_v1')")  # Insert
@@ -605,24 +667,12 @@ def test_pattern():
 
             with changeset(writer_conn, table_mapping) as changeset_data:
                 for operation in changeset_data["AppTable"]:
-                    if isinstance(operation, UpsertOp):
-                        replica_conn.execute(
-                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
-                            (operation.rowid, operation.data["id"], operation.data["data"]),
-                        )
-                    elif isinstance(operation, DeleteOp):
-                        replica_conn.execute(
-                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
-                        )
+                    apply_changeset_operation(replica_conn, "AppTable", operation)
 
-            # Final verification
-            writer_rows = writer_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            replica_rows = replica_conn.execute(
-                "SELECT id, data FROM AppTable ORDER BY id"
-            ).fetchall()
-            assert writer_rows == replica_rows, "Tables don't match after checkpoint 3"
+            # Final verification using hash comparison
+            writer_hash = compute_table_hash(writer_conn, "AppTable")
+            replica_hash = compute_table_hash(replica_conn, "AppTable")
+            assert writer_hash == replica_hash, "Tables don't match after checkpoint 3"
 
             # Verify final state manually
             expected_data = {
