@@ -500,12 +500,178 @@ def test_pattern():
 
             print("✓ Explicit rowid table test passed")
 
+    def test_replication():
+        """Test replication between writer and replica using changesets."""
+        # Create writer and replica databases
+        with sqlite3_test_db() as writer_conn, sqlite3_test_db() as replica_conn:
+            # Setup both databases with identical schema
+            setup_changes_table(writer_conn)
+            setup_changes_table(replica_conn)
+
+            writer_conn.execute("CREATE TABLE AppTable (id INTEGER PRIMARY KEY, data TEXT)")
+            replica_conn.execute("CREATE TABLE AppTable (id INTEGER PRIMARY KEY, data TEXT)")
+
+            table_mapping = {"AppTable": 1}
+            setup_triggers(writer_conn, "AppTable", table_id=table_mapping["AppTable"])
+            setup_triggers(replica_conn, "AppTable", table_id=table_mapping["AppTable"])
+
+            # === CHECKPOINT 1: Initial data ===
+            print("  Checkpoint 1: Initial data")
+            initial_data = [
+                (1, "data1_v1"),
+                (2, "data2_v1"),
+                (3, "data3_v1"),
+                (4, "data4_v1"),
+            ]
+
+            for row_id, data_value in initial_data:
+                writer_conn.execute(
+                    "INSERT INTO AppTable (id, data) VALUES (?, ?)", (row_id, data_value)
+                )
+
+            # Generate changeset and apply to replica
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                for operation in changeset_data["AppTable"]:
+                    if isinstance(operation, UpsertOp):
+                        replica_conn.execute(
+                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
+                            (operation.rowid, operation.data["id"], operation.data["data"]),
+                        )
+                    elif isinstance(operation, DeleteOp):
+                        replica_conn.execute(
+                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
+                        )
+
+            # Verify tables match
+            writer_rows = writer_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            replica_rows = replica_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            assert writer_rows == replica_rows, "Tables don't match after checkpoint 1"
+
+            # === CHECKPOINT 2: Updates and new data ===
+            print("  Checkpoint 2: Updates and new data")
+            writer_conn.execute("UPDATE AppTable SET data = 'data1_v2' WHERE id = 1")  # Update
+            writer_conn.execute("UPDATE AppTable SET data = 'data2_v2' WHERE id = 2")  # Update
+            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (5, 'data5_v1')")  # Insert
+            writer_conn.execute("DELETE FROM AppTable WHERE id = 4")  # Delete
+
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                for operation in changeset_data["AppTable"]:
+                    if isinstance(operation, UpsertOp):
+                        replica_conn.execute(
+                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
+                            (operation.rowid, operation.data["id"], operation.data["data"]),
+                        )
+                    elif isinstance(operation, DeleteOp):
+                        replica_conn.execute(
+                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
+                        )
+
+            # Verify tables match
+            writer_rows = writer_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            replica_rows = replica_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            assert writer_rows == replica_rows, "Tables don't match after checkpoint 2"
+
+            # === CHECKPOINT 3: Complex changes ===
+            print("  Checkpoint 3: Complex changes")
+            writer_conn.execute(
+                "UPDATE AppTable SET data = 'data1_v3' WHERE id = 1"
+            )  # Update again
+            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (6, 'data6_v1')")  # Insert
+            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (7, 'data7_v1')")  # Insert
+
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                for operation in changeset_data["AppTable"]:
+                    if isinstance(operation, UpsertOp):
+                        replica_conn.execute(
+                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
+                            (operation.rowid, operation.data["id"], operation.data["data"]),
+                        )
+                    elif isinstance(operation, DeleteOp):
+                        replica_conn.execute(
+                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
+                        )
+
+            writer_conn.execute("DELETE FROM AppTable WHERE id = 3")  # Delete
+            writer_conn.execute("INSERT INTO AppTable (id, data) VALUES (8, 'data8_v1')")  # Insert
+            writer_conn.execute("DELETE FROM AppTable WHERE id = 7")  # Delete what we just inserted
+
+            with changeset(writer_conn, table_mapping) as changeset_data:
+                for operation in changeset_data["AppTable"]:
+                    if isinstance(operation, UpsertOp):
+                        replica_conn.execute(
+                            "INSERT OR REPLACE INTO AppTable (rowid, id, data) VALUES (?, ?, ?)",
+                            (operation.rowid, operation.data["id"], operation.data["data"]),
+                        )
+                    elif isinstance(operation, DeleteOp):
+                        replica_conn.execute(
+                            "DELETE FROM AppTable WHERE rowid = ?", (operation.rowid,)
+                        )
+
+            # Final verification
+            writer_rows = writer_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            replica_rows = replica_conn.execute(
+                "SELECT id, data FROM AppTable ORDER BY id"
+            ).fetchall()
+            assert writer_rows == replica_rows, "Tables don't match after checkpoint 3"
+
+            # Verify final state manually
+            expected_data = {
+                1: "data1_v3",  # Updated twice
+                2: "data2_v2",  # Updated once
+                5: "data5_v1",  # Inserted
+                6: "data6_v1",  # Inserted
+                8: "data8_v1",  # Inserted
+                # 3, 4, 7 were deleted
+            }
+
+            for row_id, expected_value in expected_data.items():
+                writer_result = writer_conn.execute(
+                    "SELECT data FROM AppTable WHERE id = ?", (row_id,)
+                ).fetchone()
+                replica_result = replica_conn.execute(
+                    "SELECT data FROM AppTable WHERE id = ?", (row_id,)
+                ).fetchone()
+
+                writer_value = writer_result[0] if writer_result else None
+                replica_value = replica_result[0] if replica_result else None
+
+                assert writer_value == expected_value, (
+                    f"Writer row {row_id}: expected {expected_value}, got {writer_value}"
+                )
+                assert replica_value == expected_value, (
+                    f"Replica row {row_id}: expected {expected_value}, got {replica_value}"
+                )
+
+            # Verify deleted rows
+            for deleted_id in [3, 4, 7]:
+                writer_result = writer_conn.execute(
+                    "SELECT data FROM AppTable WHERE id = ?", (deleted_id,)
+                ).fetchone()
+                replica_result = replica_conn.execute(
+                    "SELECT data FROM AppTable WHERE id = ?", (deleted_id,)
+                ).fetchone()
+                assert writer_result is None, f"Writer should not have deleted row {deleted_id}"
+                assert replica_result is None, f"Replica should not have deleted row {deleted_id}"
+
+            print("✓ Replication test passed")
+
     # Run all tests
     print("Running trigger-lite CDC pattern tests...")
     test_basic_changeset()
     test_multiple_tables()
     test_changeset_cleanup()
     test_explicit_rowid_table()
+    test_replication()
     print("✅ All tests passed!")
 
 
