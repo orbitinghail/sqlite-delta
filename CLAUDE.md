@@ -46,3 +46,7 @@ Run lint, fmt, and test before finishing any task to verify correctness.
 
 - `pattern.py` - Complete Python implementation with comprehensive tests and examples
 - `README.md` - Pattern documentation and usage examples
+
+## Commit Guidelines
+
+- When committing on behalf of the user just sign off with: `Co-Authored-By: Claude <noreply@anthropic.com>`
