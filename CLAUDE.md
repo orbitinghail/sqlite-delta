@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `sqlite-delta`, a collection of Change Data Capture (CDC) patterns for SQLite databases. The project provides reusable SQL patterns that developers can copy and adapt into their SQLite-based applications.
+This is `sqlite-delta`, a collection of Change Data Capture (CDC) patterns for SQLite databases. **This repository is educational** - the patterns are designed to be studied, understood, and adapted rather than used directly in production.
+
+The Python implementations serve as working examples with comprehensive tests to demonstrate the concepts. Users should read and understand the patterns, then re-implement them in their own codebase tailored to their specific tables and requirements.
 
 ## Essential Commands
 
@@ -32,7 +34,6 @@ Run lint, fmt, and test before finishing any task to verify correctness.
 ### Dependencies
 
 - **uv** - Python package manager and task runner (required)
-- **sqlite3** - SQLite command line tool (required)
 
 ## Repository layout
 
@@ -43,6 +44,5 @@ Run lint, fmt, and test before finishing any task to verify correctness.
 
 ### Pattern file structure
 
-- `pattern.sql` - Complete SQL implementation (legacy)
-- `pattern.py` - Python implementation of pattern along with comprehensive tests
-- `README.md` - Additional pattern documentation and usage examples
+- `pattern.py` - Complete Python implementation with comprehensive tests and examples
+- `README.md` - Pattern documentation and usage examples

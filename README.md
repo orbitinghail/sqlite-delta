@@ -5,7 +5,9 @@
 
 ---
 
-`sqlite-delta` is a collection of tested change-data-capture (CDC) patterns which can be used with SQLite. Patterns can be found in [./patterns], and each one includes a README documenting usage along with sample SQL files and tests.
+`sqlite-delta` is a collection of tested change-data-capture (CDC) patterns for SQLite databases. **This repository is educational** - the patterns are designed to be studied, understood, and adapted for your specific use case rather than used directly in production.
+
+The provided implementations serve as working examples with comprehensive tests to demonstrate the concepts. Users should read and understand the patterns, then re-implement them in their own codebase tailored to their specific tables and requirements.
 
 ## Patterns
 
@@ -19,10 +21,11 @@
 
 ## Dependencies
 
-To run scripts and tests in this project, you'll need the following dependencies installed:
+To run scripts and tests in this project, you'll need to install [uv](https://docs.astral.sh/uv/). Then run the following command to install all dependencies:
 
-- [uv](https://docs.astral.sh/uv/)
-- [sqlite3](https://www.sqlite.org/)
+```sh
+uv sync
+```
 
 ## Acknowledgments
 
