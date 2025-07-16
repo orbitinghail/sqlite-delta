@@ -56,8 +56,13 @@ Generating a changeset must perform the following operations across three transa
 
 **Transaction 3**: Cleanup
 
-- delete any dead phase=2 rows or phase=2 rows which have been modified in phase=1
-- update any rows in phase 1 to phase 2
+First we need to remove three classes of rows:
+
+1. deleted phase 2 rows
+2. deleted phase 1 rows
+3. phase 2 rows which are being updated/deleted by a phase 1 row
+
+Then we update any rows left in phase 1 to phase 2.
 
 See `changeset()` in [pattern.py] for an example implementation which uses the fossil delta algorithm to compute differences.
 

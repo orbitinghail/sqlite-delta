@@ -121,6 +121,9 @@ def logical_delete(conn: sqlite3.Connection, table_name: str, row_id: int) -> No
     """
     Logically delete a row by setting deleted=1 with phase=0.
 
+    Note: We can clear the data here to save space, but it is not strictly
+    necessary for correctness. The row will be removed once it reaches phase=2.
+
     Args:
         conn: SQLite database connection
         table_name: Name of the table
@@ -129,7 +132,9 @@ def logical_delete(conn: sqlite3.Connection, table_name: str, row_id: int) -> No
     sql = f"""
         INSERT INTO {table_name} (id, deleted)
         VALUES (?, 1)
-        ON CONFLICT (id, phase) DO UPDATE SET deleted = excluded.deleted
+        ON CONFLICT (id, phase) DO UPDATE SET
+            deleted = excluded.deleted,
+            data = NULL
     """
     conn.execute(sql, (row_id,))
 
@@ -245,22 +250,30 @@ def changeset(conn: sqlite3.Connection, table_name: str) -> Iterator[List[Change
         # lose changes
         raise
     else:
-        # Step 3: Cleanup - remove dead phase=2 rows and migrate phase 1 to phase 2
+        # Step 3: Cleanup: remove deleted rows and then move all alive rows to phase=2
         with conn:
-            # Remove dead phase=2 rows or phase=2 rows which are about to be updated
+            # First we need to remove three classes of rows:
+            #   1. deleted phase=2 rows
+            #   2. deleted phase=1 rows
+            #   3. phase=2 rows which are being updated/deleted by a phase=1 row
             conn.execute(f"""
                 DELETE FROM {table_name} as outer
                 WHERE
-                    phase = 2 AND
                     (
-                        -- First case: dead phase=2 rows
-                        deleted = 1
+                        phase = 2 AND
+                        (
+                            -- First case: deleted phase=2 rows
+                            deleted = 1
 
-                        -- Second case: phase=2 rows which are in phase=1
-                        OR EXISTS (
-                            SELECT * FROM {table_name} as inner
-                            WHERE outer.id = inner.id AND phase = 1
+                            -- Third case: phase=2 rows which are in phase=1
+                            OR EXISTS (
+                                SELECT * FROM {table_name} as inner
+                                WHERE outer.id = inner.id AND phase = 1
+                            )
                         )
+                    ) OR (
+                        -- Second case: deleted phase=1 rows
+                        phase = 1 AND deleted = 1
                     )
             """)
 
