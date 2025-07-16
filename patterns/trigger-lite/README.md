@@ -19,7 +19,7 @@ CREATE TABLE changes (
 ) WITHOUT ROWID;
 ```
 
-See [`setup_changes_table()`](pattern.py) for the implementation.
+See `setup_changes_table()` in [pattern.py] for the implementation.
 
 ### 2. Database Triggers
 
@@ -31,7 +31,7 @@ Automatic triggers on each tracked table that record changes to the changes tabl
 
 Each trigger assigns a unique **Global Sequence Number (GSN)** to maintain change ordering across all tables.
 
-See [`setup_triggers()`](pattern.py) for the implementation.
+See `setup_triggers()` in [pattern.py] for the implementation.
 
 ### 3. Changeset Generation
 
@@ -42,7 +42,7 @@ A context manager that atomically:
 3. Returns typed operations (`UpsertOp` for inserts/updates, `DeleteOp` for deletes)
 4. Automatically cleans up processed changes
 
-See [`changeset()`](pattern.py) for the implementation.
+See `changeset()` in [pattern.py] for the implementation.
 
 ### 4. Checkpoint Generation
 
@@ -63,10 +63,12 @@ Before Checkpointing the database, you must truncate the `changes` table. This e
 
 ## Implementation Details
 
-See [`run_example()`](pattern.py) for a complete working example and the test functions for comprehensive usage patterns.
+See `run_example()` in [pattern.py] for a complete working example and the test functions for comprehensive usage patterns.
 
 ## Tweaks
 
 - **Primary key tracking**: Instead of SQLite rowid, use table primary keys(requires extending SQLite with a custom function to encode multi-column PKs)
 - **String table names**: Use table names instead of IDs in the changes table (less efficient but more readable; if you do this consider removing `WITHOUT ROWID`)
 - **Custom cleanup**: Implement custom changeset retention policies instead of immediate cleanup (will require keeping around the GSN to start the next changeset from)
+
+[pattern.py]: pattern.py

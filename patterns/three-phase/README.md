@@ -24,20 +24,20 @@ CREATE TABLE IF NOT EXISTS AppTable (
 )
 ```
 
-See [`setup_three_phase_table()`](pattern.py) for the implementation.
+See `setup_three_phase_table()` in [pattern.py] for the implementation.
 
 ### 2. Phase Management
 
-**Phase 0**: New rows and updates from application operations
-**Phase 1**: Rows being processed by an active changeset
-**Phase 2**: Stable rows that have been through changeset processing
+- **Phase 0**: New rows and updates from application operations
+- **Phase 1**: Rows being processed by an active changeset
+- **Phase 2**: Stable rows that have been through changeset processing
 
 Application operations always target phase 0, while changeset generation works with phases 1 and 2.
 
 > [!TIP]
 > One way to reason about the three phases is to think of the rows compacting into phase 2 over time. It's loosly similar to how LSM trees compact tuples into lower-level layers.
 
-See [`insert_or_update()`](pattern.py) and [`logical_delete()`](pattern.py) for how to safely modify a three-phase table.
+See `insert_or_update()` and `logical_delete()` in [pattern.py] for how to safely modify a three-phase table.
 
 ### 3. Changeset Generation
 
@@ -59,7 +59,7 @@ Generating a changeset must perform the following operations across three transa
 - delete any dead phase=2 rows or phase=2 rows which have been modified in phase=1
 - update any rows in phase 1 to phase 2
 
-See [`changeset()`](pattern.py) for an example implementation which uses the fossil delta algorithm to compute differences.
+See `changeset()` in [pattern.py] for an example implementation which uses the fossil delta algorithm to compute differences.
 
 ### 4. Checkpoint Generation
 
@@ -68,7 +68,7 @@ Periodically compact the table to prevent unbounded growth of changesets. This o
 1. delete all rows which are logically deleted or are not the latest version
 2. update all rows to phase=2
 
-See [`compact()`](pattern.py) for the implementation.
+See `compact()` in [pattern.py] for the implementation.
 
 ## Requirements
 
@@ -82,9 +82,11 @@ See [`compact()`](pattern.py) for the implementation.
 
 ## Implementation Details
 
-See [`run_example()`](pattern.py) for a complete working example and the test functions for comprehensive usage patterns including crash recovery scenarios.
+See `run_example()` in [pattern.py] for a complete working example and the test functions for comprehensive usage patterns including crash recovery scenarios.
 
 ## Tweaks
 
 - **Inline delta computation**: Extend SQLite with a function to perform delta computation during changeset queries (may avoid extra data copies)
 - **Alternative delta algorithms**: Replace fossil delta with other compression algorithms suited to your data
+
+[pattern.py]: pattern.py
