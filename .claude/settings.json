@@ -1,6 +1,6 @@
 {
   "permissions": {
-    "allow": ["Bash(uv:*)"],
+    "allow": ["Bash(uv:*)", "Bash(git add:*)", "Bash(git commit:*)"],
     "deny": [],
     "defaultMode": "acceptEdits"
   }
