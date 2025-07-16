@@ -35,7 +35,7 @@ See `setup_three_phase_table()` in [pattern.py] for the implementation.
 Application operations always target phase 0, while changeset generation works with phases 1 and 2.
 
 > [!TIP]
-> One way to reason about the three phases is to think of the rows compacting into phase 2 over time. It's loosly similar to how LSM trees compact tuples into lower-level layers.
+> One way to reason about the three phases is to think of the rows compacting into phase 2 over time. It's loosely similar to how LSM trees compact tuples into lower-level layers.
 
 See `insert_or_update()` and `logical_delete()` in [pattern.py] for how to safely modify a three-phase table.
 
