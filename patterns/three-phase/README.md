@@ -72,7 +72,7 @@ Periodically compact the table to prevent unbounded growth of changesets. This o
 1. delete all rows which are logically deleted or are not the latest version
 2. update all rows to phase=2
 
-After running compaction, the database history is fully reset. The resulting database file needs to be sent to any replicas in entirely before replicating changes can resume.
+After running compaction and generating a Checkpoint, the database history is fully reset. The resulting Checkpoint needs to be sent to any replicas in entirely before replicating changes can resume.
 
 See `compact()` in [pattern.py] for the implementation.
 
