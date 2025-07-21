@@ -50,6 +50,8 @@ Periodically a Checkpoint should be created to allow the history of changesets t
 
 Before Checkpointing the database, you must truncate the `changes` table. This effectively resets the change history allowing it to start from scratch.
 
+After running compaction and generating a Checkpoint, the database history is fully reset. The resulting Checkpoint needs to be sent to any replicas in entirely before replicating changes can resume.
+
 ## Requirements
 
 - **Explicit rowid**: Tables must use either `INTEGER PRIMARY KEY` or an explicit rowid column

@@ -21,7 +21,12 @@ from typing import Any, Dict, Iterator, List, Literal, Union
 # Add parent directory to path to import testlib
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from testlib import compute_table_hash, generate_random_workload, sqlite3_test_db
+from testlib import (
+    assert_tables_equal,
+    compute_table_hash,
+    generate_random_workload,
+    sqlite3_test_db,
+)
 
 
 @dataclass
@@ -431,21 +436,20 @@ def test_random_workload(
         print(f"  Applied {operation_count} operations in {time.time() - start_time:.2f} seconds")
         print(f"  Applied {changeset_count} changesets to replica")
 
-        # Compute hashes of all three tables
-        writer_hash = compute_table_hash(writer_conn, writer_table)
-        replica_hash = compute_table_hash(replica_conn, replica_table)
-        regular_hash = compute_table_hash(regular_conn, regular_table)
-
-        print(f"  Writer hash:  {writer_hash}")
-        print(f"  Replica hash: {replica_hash}")
-        print(f"  Regular hash: {regular_hash}")
-
-        # All tables should have the same content
-        assert writer_hash == replica_hash, (
-            f"Writer and replica hashes don't match: {writer_hash} != {replica_hash}"
+        # Verify all three tables are equal
+        assert_tables_equal(
+            "writer and replica tables mismatch",
+            writer_conn,
+            writer_table,
+            replica_conn,
+            replica_table,
         )
-        assert writer_hash == regular_hash, (
-            f"Writer and regular hashes don't match: {writer_hash} != {regular_hash}"
+        assert_tables_equal(
+            "writer and regular tables mismatch",
+            writer_conn,
+            writer_table,
+            regular_conn,
+            regular_table,
         )
 
         print("  ✓ All table hashes match! Random workload test passed.")

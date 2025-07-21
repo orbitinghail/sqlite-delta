@@ -10,8 +10,10 @@ import hashlib
 import random
 import sqlite3
 import struct
-from contextlib import contextmanager
-from typing import Iterator
+from contextlib import closing, contextmanager
+from typing import Iterator, List, Literal
+
+from pretty_good_diff import show_diff
 
 
 @contextmanager
@@ -21,7 +23,7 @@ def sqlite3_test_db() -> Iterator[sqlite3.Connection]:
         yield conn
 
 
-def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
+def compute_hash_from_rows(rows: Iterator[tuple]) -> str:
     """
     Compute a SHA256 hash from an iterator of row tuples.
 
@@ -29,7 +31,6 @@ def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
 
     Args:
         rows: Iterator of row tuples
-        debug: Whether to print debug information
 
     Returns:
         Hex string of the SHA256 hash
@@ -37,9 +38,6 @@ def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
     hasher = hashlib.sha256()
 
     for row in rows:
-        if debug:
-            print(f"Row: {row}")
-
         for cell in row:
             if cell is None:
                 hasher.update(b"n")
@@ -64,7 +62,9 @@ def compute_hash_from_rows(rows: Iterator[tuple], debug: bool = False) -> str:
     return hasher.hexdigest()
 
 
-def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
+def compute_table_hash(
+    conn: sqlite3.Connection, table_name: str, columns: List[str] | Literal["*"] = "*"
+) -> str:
     """
     Compute a SHA256 hash of a table's contents for verification.
 
@@ -79,6 +79,7 @@ def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = 
     Returns:
         Hex string of the SHA256 hash
     """
+
     # Get ordered list of column names
     schema_cursor = conn.execute(f"PRAGMA table_info({table_name})")
     pk_columns = []
@@ -93,9 +94,10 @@ def compute_table_hash(conn: sqlite3.Connection, table_name: str, debug: bool = 
     order_by = ", ".join(name for _, name in pk_columns) if pk_columns else "ROWID"
 
     # Rely on SQLite's default row order (by PK or ROWID)
-    cursor = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}")
+    cols = ", ".join(columns) if columns != "*" else "*"
+    cursor = conn.execute(f"SELECT {cols} FROM {table_name} ORDER BY {order_by}")
 
-    return compute_hash_from_rows(cursor, debug)
+    return compute_hash_from_rows(cursor)
 
 
 def generate_random_workload(max_id: int, seed: int) -> Iterator[tuple]:
@@ -131,12 +133,56 @@ def generate_random_workload(max_id: int, seed: int) -> Iterator[tuple]:
 
         elif operation_type == "update" and existing_ids:
             # Update an existing row
-            target_id = random.choice(list(existing_ids))
+            target_id = random.choice(sorted(list(existing_ids)))
             data = f"updated_data_{target_id}_v{random.randint(1, 1000)}"
             yield ("upsert", target_id, data)
 
         elif operation_type == "delete" and existing_ids:
             # Delete an existing row
-            target_id = random.choice(list(existing_ids))
+            target_id = random.choice(sorted(list(existing_ids)))
             existing_ids.discard(target_id)
             yield ("delete", target_id, "")
+
+
+def dump_db(db: sqlite3.Connection, filename: str):
+    """
+    Dump the contents of the SQLite database to a file.
+
+    Args:
+        db: SQLite database connection
+        filename: File to write the dump to
+    """
+    with closing(sqlite3.connect(filename)) as dump_conn:
+        db.backup(dump_conn)
+
+
+def assert_tables_equal(
+    errmsg: str,
+    conn1: sqlite3.Connection,
+    table1: str,
+    conn2: sqlite3.Connection,
+    table2: str,
+    columns: List[str] | Literal["*"] = "*",
+):
+    """
+    Compare two tables in different SQLite connections, failing if they differ.
+    This function will print out differences if they differ.
+    """
+    hash1 = compute_table_hash(conn1, table1, columns)
+    hash2 = compute_table_hash(conn2, table2, columns)
+
+    if hash1 != hash2:
+        print(f"Failure: {errmsg}")
+        print(f"Hash {table1}: {hash1}")
+        print(f"Hash {table2}: {hash2}")
+
+        cols = ", ".join(columns) if columns != "*" else "*"
+        table1_rows = conn1.execute(f"SELECT {cols} FROM {table1}").fetchall()
+        table1_rows = {r[0]: r for r in table1_rows}
+        table2_rows = conn2.execute(f"SELECT {cols} FROM {table2}").fetchall()
+        table2_rows = {r[0]: r for r in table2_rows}
+
+        print("Differences found:")
+        show_diff(table1_rows, table2_rows)
+        print("-" * 80)
+        raise AssertionError(errmsg)

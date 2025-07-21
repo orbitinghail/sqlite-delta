@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Collection of CDC patterns for SQLite."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["python-fossil-delta>=18.11.27"]
+dependencies = [
+    "pretty-good-diff>=0.1.0",
+    "python-fossil-delta>=18.11.27",
+]
 
 [dependency-groups]
 dev = ["poethepoet>=0.36.0", "pyright>=1.1.403", "ruff>=0.12.3"]

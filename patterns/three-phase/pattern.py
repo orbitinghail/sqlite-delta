@@ -24,7 +24,7 @@ import fossil_delta
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from testlib import (
-    compute_hash_from_rows,
+    assert_tables_equal,
     compute_table_hash,
     generate_random_workload,
     sqlite3_test_db,
@@ -132,6 +132,9 @@ def insert_or_update(conn: sqlite3.Connection, table_name: str, row_id: int, dat
     """
     Insert or update a row using upsert operation targeting phase 0.
 
+    Note: This operation must set `deleted=0` in case the row was previously
+    logically deleted and is still in phase 0.
+
     Args:
         conn: SQLite database connection
         table_name: Name of the table
@@ -141,7 +144,7 @@ def insert_or_update(conn: sqlite3.Connection, table_name: str, row_id: int, dat
     sql = f"""
         INSERT INTO {table_name} (id, data)
         VALUES (?, ?)
-        ON CONFLICT (id, phase) DO UPDATE SET data = excluded.data
+        ON CONFLICT (id, phase) DO UPDATE SET data = excluded.data, deleted = 0
     """
     conn.execute(sql, (row_id, data))
 
@@ -150,8 +153,10 @@ def logical_delete(conn: sqlite3.Connection, table_name: str, row_id: int) -> No
     """
     Logically delete a row by setting deleted=1 with phase=0.
 
-    Note: We can clear the data here to save space, but it is not strictly
-    necessary for correctness. The row will be removed once it reaches phase=2.
+    Note: We also clear the data column to save space. This is an optimization
+    that is not needed for correctness as the row is no longer logically visible
+    to queries and will eventually be removed either during compaction or after
+    it reaches phase 2.
 
     Args:
         conn: SQLite database connection
@@ -282,27 +287,20 @@ def changeset(conn: sqlite3.Connection, table_name: str) -> Iterator[List[Change
         # Step 3: Cleanup: remove deleted rows and then move all alive rows to phase=2
         with conn:
             # First we need to remove three classes of rows:
-            #   1. deleted phase=2 rows
-            #   2. deleted phase=1 rows
-            #   3. phase=2 rows which are being updated/deleted by a phase=1 row
+            #   1. deleted phase=1 rows
+            #   2. phase=2 rows which are being updated/deleted by a phase=1 row
             conn.execute(f"""
                 DELETE FROM {table_name} as outer
                 WHERE
                     (
-                        phase = 2 AND
-                        (
-                            -- First case: deleted phase=2 rows
-                            deleted = 1
-
-                            -- Third case: phase=2 rows which are in phase=1
-                            OR EXISTS (
-                                SELECT * FROM {table_name} as inner
-                                WHERE outer.id = inner.id AND phase = 1
-                            )
-                        )
-                    ) OR (
-                        -- Second case: deleted phase=1 rows
+                        -- First case: deleted phase=1 rows
                         phase = 1 AND deleted = 1
+                    ) OR (
+                        -- Second case: phase=2 rows which are in phase=1
+                        phase = 2 AND EXISTS (
+                            SELECT * FROM {table_name} as inner
+                            WHERE outer.id = inner.id AND phase = 1
+                        )
                     )
             """)
 
@@ -337,25 +335,6 @@ def compact(conn: sqlite3.Connection, table_name: str) -> None:
 
         # Then update the remaining rows to phase 2
         conn.execute(f"UPDATE {table_name} SET phase = 2")
-
-
-def compute_id_data_hash(conn: sqlite3.Connection, table_name: str, debug: bool = False) -> str:
-    """
-    Compute a SHA256 hash of only the id and data columns from a table.
-
-    This function can be used to compare tables that have different schemas
-    but should contain the same id/data pairs.
-
-    Args:
-        conn: SQLite database connection
-        table_name: Name of the table to hash
-        debug: Whether to print debug information
-
-    Returns:
-        Hex string of the SHA256 hash
-    """
-    cursor = conn.execute(f"SELECT id, data FROM {table_name} ORDER BY id")
-    return compute_hash_from_rows(cursor, debug)
 
 
 def apply_changeset_operation(
@@ -434,7 +413,7 @@ def apply_operation_to_regular_table(
 
 def test_random_workload(
     seed: int | None = None,
-    duration_seconds: float = 2.0,
+    operations: int = 200_000,
     max_id: int = 100,
     replication_probability: float = 0.1,
 ) -> None:
@@ -460,7 +439,7 @@ def test_random_workload(
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    print(f"  Running random workload test for {duration_seconds} seconds...")
+    print(f"  Running random workload test with {operations} ops...")
     print(
         f"  Using max_id={max_id}, replication_probability={replication_probability}, seed={seed}"
     )
@@ -484,7 +463,7 @@ def test_random_workload(
         start_time = time.time()
         workload_gen = generate_random_workload(max_id, seed)
 
-        while time.time() - start_time < duration_seconds:
+        while operation_count < operations:
             # Get next operation
             operation_type, row_id, data = next(workload_gen)
             operation_count += 1
@@ -521,21 +500,21 @@ def test_random_workload(
         compact(writer_conn, writer_table)
         compact(replica_conn, replica_table)
 
-        # Compute hashes of all three tables (comparing only id+data columns)
-        writer_hash = compute_id_data_hash(writer_conn, writer_table)
-        replica_hash = compute_id_data_hash(replica_conn, replica_table)
-        regular_hash = compute_id_data_hash(regular_conn, regular_table)
-
-        print(f"  Writer hash:  {writer_hash}")
-        print(f"  Replica hash: {replica_hash}")
-        print(f"  Regular hash: {regular_hash}")
-
-        # All tables should have the same id+data content
-        assert writer_hash == replica_hash, (
-            f"Writer and replica hashes don't match: {writer_hash} != {replica_hash}"
+        # Verify all three tables are equal
+        assert_tables_equal(
+            "writer and replica tables mismatch",
+            writer_conn,
+            writer_table,
+            replica_conn,
+            replica_table,
         )
-        assert writer_hash == regular_hash, (
-            f"Writer and regular hashes don't match: {writer_hash} != {regular_hash}"
+        assert_tables_equal(
+            "writer and regular tables mismatch",
+            writer_conn,
+            writer_table,
+            regular_conn,
+            regular_table,
+            ["id", "data"],
         )
 
         print("  ✓ All table hashes match! Random workload test passed.")
@@ -1008,6 +987,10 @@ def test_pattern():
     test_compact()
     test_crash_safety()
     test_random_workload()
+
+    # Regression test: this seed generates a delete+insert in phase=0
+    test_random_workload(seed=1480188984)
+
     print("✅ All tests passed!")
 
 

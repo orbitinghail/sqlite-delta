@@ -56,11 +56,10 @@ Generating a changeset must perform the following operations across three transa
 
 **Transaction 3**: Cleanup
 
-First we need to remove three classes of rows:
+First we need to remove two kinds of rows:
 
-1. deleted phase 2 rows
-2. deleted phase 1 rows
-3. phase 2 rows which are being updated/deleted by a phase 1 row
+1. deleted phase 1 rows
+2. phase 2 rows which are being updated/deleted by a phase 1 row
 
 Then we update any rows left in phase 1 to phase 2.
 
@@ -72,6 +71,8 @@ Periodically compact the table to prevent unbounded growth of changesets. This o
 
 1. delete all rows which are logically deleted or are not the latest version
 2. update all rows to phase=2
+
+After running compaction, the database history is fully reset. The resulting database file needs to be sent to any replicas in entirely before replicating changes can resume.
 
 See `compact()` in [pattern.py] for the implementation.
 
