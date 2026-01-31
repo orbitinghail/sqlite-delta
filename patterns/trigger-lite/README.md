@@ -6,9 +6,9 @@ The trigger-lite pattern provides automatic Change Data Capture (CDC) for SQLite
 
 The pattern consists of three main components:
 
-### 1. Changes Table
+### 1. Changes Tables
 
-A central table that tracks all modifications across your application tables:
+A changes table that tracks all modifications across your application tables:
 
 ```sql
 CREATE TABLE changes (
@@ -19,7 +19,15 @@ CREATE TABLE changes (
 ) WITHOUT ROWID;
 ```
 
-See `setup_changes_table()` in [pattern.py] for the implementation.
+And a table used to track the maximum global sequence number:
+
+```sql
+CREATE TABLE IF NOT EXISTS changes_gsn (
+    max_gsn INTEGER NOT NULL -- Maximum GSN
+)
+```
+
+See `setup_changes_tables()` in [pattern.py] for the implementation.
 
 ### 2. Database Triggers
 
@@ -37,7 +45,7 @@ See `setup_triggers()` in [pattern.py] for the implementation.
 
 A context manager that atomically:
 
-1. Captures the current GSN
+1. Captures the current max GSN
 2. Generates changesets by joining application tables with the changes table
 3. Returns typed operations (`UpsertOp` for inserts/updates, `DeleteOp` for deletes)
 4. Automatically cleans up processed changes
@@ -48,7 +56,7 @@ See `changeset()` in [pattern.py] for the implementation.
 
 Periodically a Checkpoint should be created to allow the history of changesets to restart. This ensures that the history doesn't get too long, as well as serving as a backup should something go wrong.
 
-Before Checkpointing the database, you must truncate the `changes` table. This effectively resets the change history allowing it to start from scratch.
+Before Checkpointing the database, you must truncate the `changes` table. This effectively resets the change history allowing it to start from scratch. You may choose to reset the max_gsn to 0 in `changes_gsn` table as well, although that is not needed. It is safer to never reset the max_gsn.
 
 After running compaction and generating a Checkpoint, the database history is fully reset. The resulting Checkpoint needs to be sent to any replicas in entirely before replicating changes can resume.
 

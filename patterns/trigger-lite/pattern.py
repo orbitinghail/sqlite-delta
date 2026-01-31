@@ -51,14 +51,17 @@ ChangesetOp = Union[UpsertOp, DeleteOp]
 Changeset = Dict[str, List[ChangesetOp]]
 
 
-def setup_changes_table(conn: sqlite3.Connection) -> None:
+def setup_changes_tables(conn: sqlite3.Connection) -> None:
     """
-    Create the changes table for tracking modifications.
+    Create the changes and changes_gsn tables for tracking modifications.
 
     The changes table stores:
     - tid: unique identifier for the application table
     - rid: row identifier of the changed row in the application table
     - gsn: Global Sequence Number for ordering changes
+
+    The changes_gsn table stores:
+    - max_gsn: The maximum GSN seen so far, incremented by each change
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS changes (
@@ -75,6 +78,13 @@ def setup_changes_table(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (tid, rid)
         ) WITHOUT ROWID
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS changes_gsn (
+            -- Global Sequence Number (GSN) is a monotonically increasing number used to sequence changes.
+            max_gsn INTEGER NOT NULL
+        )
+    """)
+    conn.execute("INSERT INTO changes_gsn (max_gsn) VALUES (0)")
 
 
 def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> None:
@@ -97,8 +107,9 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
         CREATE TRIGGER IF NOT EXISTS trg_{table_name}_insert
         AFTER INSERT ON {table_name}
         BEGIN
+            UPDATE changes_gsn SET max_gsn = max_gsn + 1;
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({table_id}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, new.rowid, (SELECT max_gsn FROM changes_gsn))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
     """
@@ -109,8 +120,9 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
         CREATE TRIGGER IF NOT EXISTS trg_{table_name}_update
         AFTER UPDATE ON {table_name}
         BEGIN
+            UPDATE changes_gsn SET max_gsn = max_gsn + 1;
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({table_id}, new.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, new.rowid, (SELECT max_gsn FROM changes_gsn))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
     """
@@ -121,8 +133,9 @@ def setup_triggers(conn: sqlite3.Connection, table_name: str, table_id: int) -> 
         CREATE TRIGGER IF NOT EXISTS trg_{table_name}_delete
         AFTER DELETE ON {table_name}
         BEGIN
+            UPDATE changes_gsn SET max_gsn = max_gsn + 1;
             INSERT INTO changes(tid, rid, gsn)
-            VALUES ({table_id}, old.rowid, (SELECT IFNULL(MAX(gsn), 0) + 1 FROM changes))
+            VALUES ({table_id}, old.rowid, (SELECT max_gsn FROM changes_gsn))
             ON CONFLICT DO UPDATE SET gsn = excluded.gsn;
         END
     """
@@ -153,7 +166,7 @@ def changeset(conn: sqlite3.Connection, table_mapping: Dict[str, int]) -> Iterat
     # Generate changeset in read transaction
     with conn:
         # Snapshot the global sequence number
-        cursor = conn.execute("SELECT IFNULL(MAX(gsn), 0) FROM changes")
+        cursor = conn.execute("SELECT max_gsn FROM changes_gsn")
         snapshot_gsn = cursor.fetchone()[0]
 
         for table_name, table_id in table_mapping.items():
@@ -383,8 +396,8 @@ def test_random_workload(
         sqlite3_test_db() as regular_conn,
     ):
         # Set up changes table for writer and replica
-        setup_changes_table(writer_conn)
-        setup_changes_table(replica_conn)
+        setup_changes_tables(writer_conn)
+        setup_changes_tables(replica_conn)
 
         # Set up tables
         writer_table = setup_workload_table(writer_conn, "WorkloadTable")
@@ -461,7 +474,7 @@ def run_example() -> None:
     """
     with sqlite3_test_db() as conn:
         # Set up the changes tracking infrastructure
-        setup_changes_table(conn)
+        setup_changes_tables(conn)
 
         # Create example tables and get table mapping
         table_mapping = create_example_tables(conn)
@@ -536,7 +549,7 @@ def test_pattern():
     def test_basic_changeset():
         """Test basic changeset generation with mixed operations."""
         with sqlite3_test_db() as conn:
-            setup_changes_table(conn)
+            setup_changes_tables(conn)
 
             # Create test table and define table mapping
             conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
@@ -589,7 +602,7 @@ def test_pattern():
     def test_multiple_tables():
         """Test changeset generation across multiple tables."""
         with sqlite3_test_db() as conn:
-            setup_changes_table(conn)
+            setup_changes_tables(conn)
 
             # Create multiple tables and define table mapping
             conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -634,7 +647,7 @@ def test_pattern():
     def test_changeset_cleanup():
         """Test that changeset context manager cleans up processed changes."""
         with sqlite3_test_db() as conn:
-            setup_changes_table(conn)
+            setup_changes_tables(conn)
 
             # Create test table and define table mapping
             conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, data TEXT)")
@@ -673,7 +686,7 @@ def test_pattern():
     def test_explicit_rowid_table():
         """Test changeset generation with explicit rowid tables."""
         with sqlite3_test_db() as conn:
-            setup_changes_table(conn)
+            setup_changes_tables(conn)
 
             # Create table with explicit rowid and define table mapping
             conn.execute("""
@@ -730,8 +743,8 @@ def test_pattern():
         # Create writer and replica databases
         with sqlite3_test_db() as writer_conn, sqlite3_test_db() as replica_conn:
             # Setup both databases with identical schema
-            setup_changes_table(writer_conn)
-            setup_changes_table(replica_conn)
+            setup_changes_tables(writer_conn)
+            setup_changes_tables(replica_conn)
 
             writer_conn.execute("CREATE TABLE AppTable (id INTEGER PRIMARY KEY, data TEXT)")
             replica_conn.execute("CREATE TABLE AppTable (id INTEGER PRIMARY KEY, data TEXT)")
@@ -852,8 +865,8 @@ def test_pattern():
             replica_conn.execute("PRAGMA foreign_keys = ON")
 
             # Setup both databases with identical schema
-            setup_changes_table(writer_conn)
-            setup_changes_table(replica_conn)
+            setup_changes_tables(writer_conn)
+            setup_changes_tables(replica_conn)
 
             # Create parent and child tables with foreign key relationship
             schema_queries = [
