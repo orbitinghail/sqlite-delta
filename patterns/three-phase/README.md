@@ -67,12 +67,12 @@ See `changeset()` in [pattern.py] for an example implementation which uses the f
 
 ### 4. Checkpoint Generation
 
-Periodically compact the table to prevent unbounded growth of changesets. This operation runs in a transaction and performs two operations:
+Before checkpointing the entire database, you should first compact any three-phase tables. To do this you run the following two operations in a transaction:
 
 1. delete all rows which are logically deleted or are not the latest version
 2. update all rows to phase=2
 
-After running compaction and generating a Checkpoint, the database history is fully reset. The resulting Checkpoint needs to be sent to any replicas in entirely before replicating changes can resume.
+After running compaction you may checkpoint the database. The resulting Checkpoint needs to be sent to any replicas in entirely before replicating changes can resume.
 
 See `compact()` in [pattern.py] for the implementation.
 
