@@ -9,6 +9,7 @@ This code is not intended for production use, but serves as a demonstration of
 the pattern and tests its correctness.
 """
 
+import argparse
 import random
 import sqlite3
 import sys
@@ -16,7 +17,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Literal, Union
+from typing import Dict, Iterator, List, Literal, Tuple, Union
 
 import fossil_delta
 
@@ -59,6 +60,20 @@ ChangesetOp = Union[InsertOp, UpdateOp, DeleteOp]
 
 # Type alias for a changeset, mapping table names to lists of operations
 Changeset = Dict[str, List[ChangesetOp]]
+
+SAMPLE_TABLE_NAME = "AppTable"
+SAMPLE_BASELINE_ROWS: List[Tuple[int, str]] = [
+    (1, "order-100:status=pending"),
+    (2, "order-200:status=pending"),
+    (3, "order-300:status=paid"),
+    (4, "order-400:status=pending"),
+    (5, "order-500:status=cancelled"),
+]
+SAMPLE_PENDING_UPSERTS: List[Tuple[int, str]] = [
+    (2, "order-200:status=shipped"),
+    (6, "order-600:status=pending"),
+]
+SAMPLE_PENDING_DELETES: List[int] = [4]
 
 
 def setup_three_phase_table(conn: sqlite3.Connection, table_name: str) -> str:
@@ -126,6 +141,61 @@ def setup_regular_table(conn: sqlite3.Connection, table_name: str) -> str:
     """
     conn.execute(sql)
     return table_name
+
+
+def setup_sample_database(db_path: Path, table_name: str = SAMPLE_TABLE_NAME) -> Path:
+    """
+    Create a new SQLite database with schema and sample three-phase data.
+
+    The database includes a phase-2 baseline plus a few pending phase-0 mutations
+    so it is immediately useful for testing changeset generation.
+
+    Args:
+        db_path: Filesystem path to create the database at
+        table_name: Name of the sample table to create
+
+    Returns:
+        The created database path.
+
+    Raises:
+        FileExistsError: If the database path already exists
+        FileNotFoundError: If the parent directory does not exist
+        sqlite3.Error: If SQLite setup fails
+    """
+    target_path = db_path.expanduser().resolve(strict=False)
+
+    if target_path.exists():
+        raise FileExistsError(f"Database already exists: {target_path}")
+
+    if not target_path.parent.exists():
+        raise FileNotFoundError(f"Parent directory does not exist: {target_path.parent}")
+
+    conn = sqlite3.connect(target_path)
+    try:
+        setup_three_phase_table(conn, table_name)
+
+        for row_id, data_value in SAMPLE_BASELINE_ROWS:
+            insert_or_update(conn, table_name, row_id, data_value)
+
+        # Promote baseline rows to phase 2.
+        with changeset(conn, table_name):
+            pass
+
+        # Leave pending phase-0 writes to demonstrate a realistic in-flight state.
+        for row_id, data_value in SAMPLE_PENDING_UPSERTS:
+            insert_or_update(conn, table_name, row_id, data_value)
+
+        for row_id in SAMPLE_PENDING_DELETES:
+            logical_delete(conn, table_name, row_id)
+
+        conn.commit()
+    except Exception:
+        conn.close()
+        target_path.unlink(missing_ok=True)
+        raise
+
+    conn.close()
+    return target_path
 
 
 def insert_or_update(conn: sqlite3.Connection, table_name: str, row_id: int, data: str) -> None:
@@ -200,6 +270,35 @@ def read_latest(conn: sqlite3.Connection, table_name: str, row_id: int) -> str |
         return None
 
     return row[0]
+
+
+def read_all_latest(conn: sqlite3.Connection, table_name: str) -> List[Tuple[str, str]]:
+    """
+    Read the latest version of every row (lowest phase, not deleted).
+
+    Args:
+        conn: SQLite database connection
+        table_name: Name of the table
+
+    Returns:
+        List of data values
+    """
+    # This query takes advantage of how SQLite handles bare-columns in an
+    # aggregate query to select the data and deleted columns corresponding to
+    # the minimum phase for each unique id.
+    # Documented here: https://www.sqlite.org/lang_select.html#bareagg
+    sql = f"""
+        SELECT id, data
+        FROM (
+            SELECT id, data, deleted, MIN(phase) AS min_phase
+            FROM {table_name}
+            GROUP BY id
+        )
+        WHERE deleted = 0
+    """
+    cursor = conn.execute(sql)
+    rows = cursor.fetchall()
+    return rows
 
 
 @contextmanager
@@ -526,7 +625,7 @@ def run_example() -> None:
     """
     with sqlite3_test_db() as conn:
         # Create example table
-        table_name = setup_three_phase_table(conn, "AppTable")
+        table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
 
         # Insert initial data
         initial_data = [
@@ -597,7 +696,7 @@ def test_pattern():
     def test_basic_operations():
         """Test basic insert, update, and delete operations."""
         with sqlite3_test_db() as conn:
-            table_name = setup_three_phase_table(conn, "AppTable")
+            table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
 
             # Test insert
             insert_or_update(conn, table_name, 1, "test data")
@@ -616,10 +715,45 @@ def test_pattern():
 
             print("✓ Basic operations test passed")
 
+    def test_read_all_latest():
+        """Test read_all_latest."""
+        with sqlite3_test_db() as conn:
+            table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
+
+            # insert two rows
+            insert_or_update(conn, table_name, 1, "bob")
+            insert_or_update(conn, table_name, 2, "alice")
+
+            rows = read_all_latest(conn, table_name)
+            assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+            assert rows[0] == (1, "bob"), f"Expected (1, 'bob'), got {rows[0]}"
+            assert rows[1] == (2, "alice"), f"Expected (2, 'alice'), got {rows[1]}"
+
+            # compact them to phase = 2
+            with changeset(conn, table_name):
+                pass
+
+            rows = read_all_latest(conn, table_name)
+            assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+            assert rows[0] == (1, "bob"), f"Expected (1, 'bob'), got {rows[0]}"
+            assert rows[1] == (2, "alice"), f"Expected (2, 'alice'), got {rows[1]}"
+
+            # delete row 1, update row 2, insert row 3
+            logical_delete(conn, table_name, 1)
+            insert_or_update(conn, table_name, 2, "alice++")
+            insert_or_update(conn, table_name, 3, "jones")
+
+            rows = read_all_latest(conn, table_name)
+            assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+            assert rows[0] == (2, "alice++"), f"Expected (2, 'alice++'), got {rows[0]}"
+            assert rows[1] == (3, "jones"), f"Expected (3, 'jones'), got {rows[1]}"
+
+            print("✓ read all latest test passed")
+
     def test_changeset_generation():
         """Test changeset generation with mixed operations."""
         with sqlite3_test_db() as conn:
-            table_name = setup_three_phase_table(conn, "AppTable")
+            table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
 
             # Insert initial data
             insert_or_update(conn, table_name, 1, "data1")
@@ -665,8 +799,8 @@ def test_pattern():
         """Test replication between writer and replica using changesets and compaction."""
         # Create writer and replica databases
         with sqlite3_test_db() as writer_conn, sqlite3_test_db() as replica_conn:
-            writer_table = setup_three_phase_table(writer_conn, "AppTable")
-            replica_table = setup_three_phase_table(replica_conn, "AppTable")
+            writer_table = setup_three_phase_table(writer_conn, SAMPLE_TABLE_NAME)
+            replica_table = setup_three_phase_table(replica_conn, SAMPLE_TABLE_NAME)
 
             # === CHECKPOINT 1: Initial data ===
             print("  Checkpoint 1: Initial data")
@@ -765,7 +899,7 @@ def test_pattern():
     def test_phase_isolation():
         """Test that concurrent writes don't interfere with changeset generation."""
         with sqlite3_test_db() as conn:
-            table_name = setup_three_phase_table(conn, "AppTable")
+            table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
 
             # Insert initial data
             insert_or_update(conn, table_name, 1, "data1")
@@ -801,7 +935,7 @@ def test_pattern():
     def test_compact():
         """Test table compaction functionality."""
         with sqlite3_test_db() as conn:
-            table_name = setup_three_phase_table(conn, "AppTable")
+            table_name = setup_three_phase_table(conn, SAMPLE_TABLE_NAME)
 
             # Insert initial data
             insert_or_update(conn, table_name, 1, "data1")
@@ -848,8 +982,8 @@ def test_pattern():
     def test_crash_safety():
         """Test that changes are not lost when application crashes during changeset generation."""
         with sqlite3_test_db() as writer_conn, sqlite3_test_db() as replica_conn:
-            writer_table = setup_three_phase_table(writer_conn, "AppTable")
-            replica_table = setup_three_phase_table(replica_conn, "AppTable")
+            writer_table = setup_three_phase_table(writer_conn, SAMPLE_TABLE_NAME)
+            replica_table = setup_three_phase_table(replica_conn, SAMPLE_TABLE_NAME)
 
             # === SETUP: Initial data ===
             print("  Setup: Creating baseline data")
@@ -981,6 +1115,7 @@ def test_pattern():
     # Run all tests
     print("Running three-phase CDC pattern tests...")
     test_basic_operations()
+    test_read_all_latest()
     test_changeset_generation()
     test_replication()
     test_phase_isolation()
@@ -994,11 +1129,42 @@ def test_pattern():
     print("✅ All tests passed!")
 
 
-if __name__ == "__main__":
-    # Run tests first
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Three-phase CDC pattern demo and tests")
+    parser.add_argument(
+        "--setup",
+        type=Path,
+        metavar="DB_PATH",
+        help=(
+            "Create a sample SQLite database at DB_PATH with schema and seed data. "
+            "Fails if DB_PATH already exists."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: List[str] | None = None) -> int:
+    """Main entrypoint for CLI behavior."""
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.setup is not None:
+        try:
+            created_path = setup_sample_database(args.setup)
+        except (FileExistsError, FileNotFoundError, sqlite3.Error, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        print(f"Sample database created at {created_path}")
+        return 0
+
+    # Default behavior: run full test suite and example.
     test_pattern()
     print("\n" + "=" * 50 + "\n")
-
-    # Then run example
     print("Running example demonstration...")
     run_example()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
